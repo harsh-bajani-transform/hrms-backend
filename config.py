@@ -1,14 +1,16 @@
 import mysql.connector
 import os, uuid
-
-
+from dotenv import load_dotenv
+load_dotenv()
+ 
+ 
 # Project base directory
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-
+ 
 # Logical upload directory (no full path stored anywhere else)
 UPLOAD_DIR = "uploads"
 UPLOAD_FOLDER = os.path.join(BASE_DIR, UPLOAD_DIR)
-
+ 
 # Sub-folders for different file types
 UPLOAD_SUBDIRS = {
     "PROFILE_PIC": "profile_pictures",
@@ -16,11 +18,12 @@ UPLOAD_SUBDIRS = {
     "TASK_FILES": "task_files",
     "TRACKER_FILES": "tracker_files"
 }
-
+ 
 def get_db_connection():
     return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="",   # default XAMPP password is empty
-        database="tfs_hrms"
+        host=os.getenv('DB_HOST', 'localhost'),  # Use env var or default to 'localhost'
+        port=int(os.getenv('DB_PORT', 3306)),    # Use env var or default to 3306
+        user=os.getenv('DB_USERNAME', 'root'),   # Use env var or default to 'root'
+        password=os.getenv('DB_PASSWORD', ''),   # Use env var or default to empty string
+        database=os.getenv('DB_DATABASE', 'tfs_hrms')  # Use env var or default to 'tfs_hrms'
     )

@@ -92,7 +92,7 @@ def list_users():
             params.append(user_id)
 
         elif role == "assistant manager":
-            query += " AND u.assistant_manager_id = %s"
+            query += " AND u.asst_manager_id = %s"
             params.append(user_id)
 
         elif role == "manager":
@@ -127,6 +127,7 @@ def list_users():
 @user_bp.route("/update_user", methods=["PUT"])
 def update_user():
     data = request.get_json()
+    print(data)
 
     if not data:
         return api_response(400, "Invalid JSON or no body received")
@@ -147,20 +148,17 @@ def update_user():
             "user_name": data.get("user_name"),
             "user_number": data.get("user_number"),
             "user_address": data.get("user_address"),
-            "user_role": data.get("user_role"),
-            "designation": data.get("designation"),
+            "role_id": data.get("role_id"),
+            "designation_id": data.get("designation_id"),
             "reporting_manager": data.get("reporting_manager"),
-            "device_type": data.get("device_type"),
-            "device_id": data.get("device_id"),
-            "team_id": data.get("team_id"),
             "is_active": data.get("is_active"),
+            "user_tenure": data.get("user_tenure"),
+            "team_id": data.get("team_id"),
             
             # ✅ JSON columns (store as JSON)
-            "project_manager_id": to_db_json(data.get("project_manager_id"), allow_single=True),
+            "project_manager_id": data.get("project_manager_id"),
             "asst_manager_id": to_db_json(data.get("asst_manager_id"), allow_single=True),
-            "qa_id": to_db_json(data.get("qa_id"), allow_single=True),
-            "team_id": to_db_json(data.get("team_id"), allow_single=True),
-            
+            "qa_id": to_db_json(data.get("qa_id"), allow_single=True)
         }
 
         user_update_cols = []
@@ -177,13 +175,13 @@ def update_user():
                 SET {', '.join(user_update_cols)}
                 WHERE user_id = %s
             """
-            print(update_user_query)
+            # print(update_user_query)
             user_update_vals.append(user_id)
             print(update_user_query, user_update_vals)
             cursor.execute(update_user_query, user_update_vals)
 
         # -------------------------------------------------------
-        # 2. Dnamic UPDATE for user_role
+        # 2. Dynamic UPDATE for user_role
         # -------------------------------------------------------
         role_fields = {
             "role_name": data.get("role_name"),

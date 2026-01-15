@@ -1,5 +1,5 @@
 from flask import Blueprint, request
-from config import get_db_connection,UPLOAD_FOLDER, UPLOAD_SUBDIRS, BASE_DIR
+from config import get_db_connection,UPLOAD_FOLDER, UPLOAD_SUBDIRS
 from utils.response import api_response
 from utils.file_utils import save_base64_file
 from datetime import datetime
@@ -92,9 +92,9 @@ def update_tracker():
         tracker = cursor.fetchone()
         if not tracker:
             return api_response(404, "Tracker not found")
-        print(tracker)
+        # print(tracker)
         new_user_id = tracker["user_id"]
-        print(new_user_id)
+        # print(new_user_id)
         cursor.execute("SELECT user_tenure FROM tfs_user WHERE user_id=%s", (new_user_id,))
         user = cursor.fetchone()
         if not user:
@@ -106,7 +106,7 @@ def update_tracker():
         tracker_file_base64 = data.get("tracker_file_base64")
         tracker_file = tracker["tracker_file"]
         if tracker_file_base64:
-            tracker_file = save_base64_tracker_file(tracker_file_base64)
+            tracker_file = save_base64_file(tracker_file_base64)
 
         actual_target, tenure_target = calculate_targets(base_target, user["user_tenure"])
         updated_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

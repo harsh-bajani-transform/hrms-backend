@@ -1,7 +1,8 @@
 from flask import Blueprint, request
 from utils.response import api_response
-from config import get_db_connection
+from config import get_db_connection, UPLOAD_FOLDER, UPLOAD_SUBDIRS
 import json
+from utils.file_utils import save_base64_file
 from datetime import datetime
 
 task_bp = Blueprint("task", __name__)
@@ -25,6 +26,14 @@ def add_task():
 
     device_id = data.get("device_id")
     device_type = data.get("device_type")
+    
+    task_file_base64 = data.get("task_file")
+    task_file = None
+    is_active=1
+    important_columns = ["Email"] #static for testing purpose
+    
+    if task_file_base64 :
+        task_file = save_base64_file(task_file_base64, UPLOAD_SUBDIRS['TASK_FILES'])
 
     now_str = datetime.now().strftime(DATE_FORMAT)
 
@@ -40,17 +49,25 @@ def add_task():
                 task_name,
                 task_description,
                 task_target,
+                task_file,
+                task_file_base64,
+                important_columns,
                 is_active,
                 created_date,
                 updated_date
             )
-            VALUES (%s,%s,%s,%s,%s,1,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             data["project_id"],
             json.dumps(data["task_team_id"]),
             data["task_name"].strip(),
             data.get("task_description", "").strip(),
             data.get("task_target"),
+            task_file,
+            task_file_base64,
+            # json.dumps(data["important_columns"]),
+            json.dumps(important_columns),
+            is_active,
             now_str,
             now_str
         ))
@@ -76,7 +93,19 @@ def update_task():
     device_type = data.get("device_type")
 
     update_values = {}
-    updatable_fields = ["project_id", "task_team_id", "task_name", "task_description", "task_target", "is_active"]
+
+    # ✅ Add new DB column in updatable list
+    updatable_fields = [
+        "project_id",
+        "task_team_id",
+        "task_name",
+        "task_description",
+        "task_target",
+        "important_columns",
+        "is_active",
+        # NOTE: we will NOT directly accept task_file here as normal field
+        # because task_file in request is base64
+    ]
 
     for key in updatable_fields:
         if key in data:
@@ -84,8 +113,31 @@ def update_task():
                 if not isinstance(data[key], list):
                     return api_response(400, "task_team_id must be a list")
                 update_values[key] = json.dumps(data[key])
+
+            elif key == "important_columns":
+                # ✅ allow list, store as JSON string if list
+                if isinstance(data[key], list):
+                    update_values[key] = json.dumps(data[key])
+                else:
+                    update_values[key] = data[key]
+
             else:
                 update_values[key] = data[key]
+
+    # ✅ Handle task file base64 -> save file -> store both columns
+    if data.get("task_file"):
+        try:
+            base64_str = data["task_file"]
+
+            # save_base64_file() is your reusable function
+            # it returns the filename like "uuid.pdf"
+            filename = save_base64_file(base64_str, "TASK_FILES")
+
+            update_values["task_file"] = filename
+            update_values["task_file_base64"] = base64_str
+
+        except Exception as e:
+            return api_response(400, f"Invalid task_file: {str(e)}")
 
     if not update_values:
         return api_response(400, "No valid fields provided for update")
@@ -96,12 +148,14 @@ def update_task():
 
     try:
         conn.start_transaction()
-        cursor.execute("SELECT * FROM task WHERE task_id=%s AND is_active=1", (task_id,))
+
+        cursor.execute("SELECT task_id FROM task WHERE task_id=%s AND is_active=1", (task_id,))
         if not cursor.fetchone():
             conn.rollback()
             return api_response(404, "Task not found")
 
         set_clause = ", ".join(f"{k}=%s" for k in update_values)
+
         cursor.execute(f"""
             UPDATE task
             SET {set_clause}, updated_date=%s
@@ -110,12 +164,15 @@ def update_task():
 
         conn.commit()
         return api_response(200, "Task updated successfully")
+
     except Exception as e:
         conn.rollback()
         return api_response(500, f"Task update failed: {str(e)}")
+
     finally:
         cursor.close()
         conn.close()
+
 
 
 # ---------------- SOFT DELETE TASK ---------------- #

@@ -12,6 +12,26 @@ ROLE_BASED_USER_DROPDOWNS = (
     "qa",
     "agent"
 )
+
+def get_user_role(cursor, user_id: int) -> str | None:
+    cursor.execute("""
+        SELECT r.role_name
+        FROM tfs_user u
+        JOIN user_role r ON r.role_id = u.role_id
+        WHERE u.user_id=%s AND u.is_active=1 AND u.is_delete=1
+    """, (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return (row.get("role_name") or "").strip().lower()
+
+
+def multi_id_match_sql(col: str) -> str:
+    # supports: 78 / 78,81 / [78] / [78,81] / ["78","81"] / spaces
+    cleaned = f"REPLACE(REPLACE(REPLACE(REPLACE({col},'[',''),']',''),'\"',''),' ','')"
+    return f"({col} = %s OR FIND_IN_SET(%s, {cleaned}) > 0)"
+
+
 # ---------------- GET DROPDOWN DATA ---------------- #
 @dropdown_bp.route("/get", methods=["POST"])
 def get():
@@ -41,7 +61,7 @@ def get():
                 ORDER BY role_name
             """
             params = []
-            
+
         elif dropdown_type == "teams":
             query = """
                 SELECT team_id,team_name AS label
@@ -65,9 +85,67 @@ def get():
                 ORDER BY u.user_name
             """
             params = (dropdown_type,)
-        
+
         elif dropdown_type == "projects with tasks":
-            query = """
+            logged_in_user_id = data.get("logged_in_user_id")
+            if not logged_in_user_id:
+                return api_response(400, "logged_in_user_id is required for projects with tasks")
+
+            logged_in_user_id = int(logged_in_user_id)
+            logged_role = get_user_role(cursor, logged_in_user_id)
+            if not logged_role:
+                return api_response(404, "Logged in user not found")
+
+            params = []
+            where_sql = "WHERE p.is_active = 1"
+
+            # Scope by role
+            if logged_role in ["admin", "super admin"]:
+                pass  # no extra scope
+
+            elif logged_role == "qa":
+                v = str(logged_in_user_id)
+                where_sql += " AND " + multi_id_match_sql("p.project_qa_id")
+                params.extend([v, v])
+
+            elif logged_role in ["project manager", "manager"]:
+                v = str(logged_in_user_id)
+                where_sql += " AND " + multi_id_match_sql("p.project_manager_id")
+                params.extend([v, v])
+
+            elif logged_role == "assistant manager":
+                v = str(logged_in_user_id)
+                where_sql += " AND " + multi_id_match_sql("p.asst_project_manager_id")
+                params.extend([v, v])
+
+            elif logged_role == "agent":
+                # Agent sees only projects where they have tracker
+                where_sql += """
+                    AND EXISTS (
+                        SELECT 1
+                        FROM task_work_tracker twt
+                        WHERE twt.is_active = 1
+                        AND twt.user_id = %s
+                        AND twt.project_id = p.project_id
+                    )
+                """
+                params.append(logged_in_user_id)
+
+            else:
+                # safest fallback: same as agent
+                where_sql += """
+                    AND EXISTS (
+                        SELECT 1
+                        FROM task_work_tracker twt
+                        WHERE twt.is_active = 1
+                        AND twt.user_id = %s
+                        AND twt.project_id = p.project_id
+                    )
+                """
+                params.append(logged_in_user_id)
+
+            # Fetch projects + tasks (tasks are by project, not tracker-specific)
+            query = f"""
                 SELECT
                     p.project_id,
                     p.project_name,
@@ -78,49 +156,42 @@ def get():
                 LEFT JOIN task t
                     ON t.project_id = p.project_id
                     AND t.is_active = 1
-                WHERE p.is_active = 1
+                {where_sql}
                 ORDER BY p.project_name, t.task_name
             """
-            cursor.execute(query)
+
+            cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
 
             projects_map = {}
-
             for row in rows:
-                project_id = row["project_id"]
-
-                if project_id not in projects_map:
-                    projects_map[project_id] = {
-                        "project_id": project_id,
+                pid = row["project_id"]
+                if pid not in projects_map:
+                    projects_map[pid] = {
+                        "project_id": pid,
                         "project_name": row["project_name"],
                         "tasks": []
                     }
 
-                if row["task_id"]:
-                    projects_map[project_id]["tasks"].append({
+                if row.get("task_id"):
+                    projects_map[pid]["tasks"].append({
                         "task_id": row["task_id"],
                         "label": row["task_name"],
                         "task_target": row["task_target"]
                     })
 
-            result = list(projects_map.values())
-
-            return api_response(
-                200,
-                "Dropdown data fetched successfully",
-                result
-            )
-
-        
+            return api_response(200, "Dropdown data fetched successfully", list(projects_map.values()))
 
         else:
             return api_response(400, "Invalid dropdown_type")
 
         cursor.execute(query, params)
         result = cursor.fetchall()
+
         for item in result:
             if "label" in item and item["label"]:
                 item["label"] = item["label"].title()
+
         return api_response(200, "Dropdown data fetched successfully", result)
 
     except Exception as e:
