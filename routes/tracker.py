@@ -106,7 +106,7 @@ def update_tracker():
         tracker_file_base64 = data.get("tracker_file_base64")
         tracker_file = tracker["tracker_file"]
         if tracker_file_base64:
-            tracker_file = save_base64_file(tracker_file_base64)
+            tracker_file = save_base64_file(tracker_file_base64, UPLOAD_SUBDIRS['TRACKER_FILES'])
 
         actual_target, tenure_target = calculate_targets(base_target, user["user_tenure"])
         updated_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
