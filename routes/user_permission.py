@@ -165,13 +165,13 @@ def update_user_permission():
         # --------------------------------------------------
         # 4) Hierarchy check
         # --------------------------------------------------
-        if role == "assistant manager":
-            if target_user["asst_manager_id"] != user_id:
-                return api_response(403, "You can update permissions only for your users")
+        # if role == "assistant manager":
+        #     if target_user["asst_manager_id"] != user_id:
+        #         return api_response(403, "You can update permissions only for your users")
 
-        elif role == "manager":
-            if target_user["project_manager_id"] != user_id:
-                return api_response(403, "You can update permissions only for your users")
+        # elif role == "manager":
+        #     if target_user["project_manager_id"] != user_id:
+        #         return api_response(403, "You can update permissions only for your users")
 
         # admin / super admin → no restriction
 
