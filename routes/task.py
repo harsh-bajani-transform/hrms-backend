@@ -7,7 +7,7 @@ from datetime import datetime
 
 task_bp = Blueprint("task", __name__)
 
-DATE_FORMAT = "%d/%m/%Y %H:%M:%S"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # ---------------- CREATE TASK ---------------- #
 @task_bp.route("/add", methods=["POST"])

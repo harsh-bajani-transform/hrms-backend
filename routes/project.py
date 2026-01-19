@@ -2,7 +2,7 @@
 
 from flask import Blueprint, request
 from utils.response import api_response
-from config import get_db_connection, UPLOAD_SUBDIRS
+from config import get_db_connection, UPLOAD_SUBDIRS, UPLOAD_FOLDER
 from utils.file_utils import save_base64_file
 import json
 import os
@@ -99,7 +99,7 @@ def create_project():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         conn.start_transaction()
@@ -172,7 +172,7 @@ def update_project():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    updated_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    updated_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         conn.start_transaction()
@@ -248,7 +248,7 @@ def delete_project():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    updated_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    updated_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         conn.start_transaction()
@@ -298,8 +298,9 @@ def list_projects():
 
             project_file_url = None
             if proj.get("project_pprt"):
-                project_file_url = os.path.join("/uploads", UPLOAD_SUBDIRS["PROJECT_PPRT"], proj["project_pprt"])
-
+                project_file_url = f"{UPLOAD_FOLDER}/{UPLOAD_SUBDIRS['PROJECT_PPRT']}/"
+                # project_file_url = os.path.join("/uploads", UPLOAD_SUBDIRS["PROJECT_PPRT"], proj["project_pprt"])
+            # print(proj)
             result.append(
                 {
                     "project_id": proj["project_id"],

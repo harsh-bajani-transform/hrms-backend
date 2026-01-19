@@ -5,6 +5,7 @@ from config import UPLOAD_SUBDIRS
 import os
 from utils.validators import validate_request
 from utils.json_utils import to_db_json
+from datetime import datetime
 
 user_bp = Blueprint("user", __name__)
 
@@ -160,7 +161,8 @@ def update_user():
             "asst_manager_id": to_db_json(data.get("asst_manager_id"), allow_single=True),
             "qa_id": to_db_json(data.get("qa_id"), allow_single=True)
         }
-
+        
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_update_cols = []
         user_update_vals = []
 
@@ -168,6 +170,8 @@ def update_user():
             if val is not None:   # update only provided fields
                 user_update_cols.append(f"{col} = %s")
                 user_update_vals.append(val)
+                user_update_cols.append("updated_date=%s")
+                user_update_vals.append(now_str)
 
         if user_update_cols:
             update_user_query = f"""

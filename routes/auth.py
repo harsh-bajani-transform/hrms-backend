@@ -111,7 +111,7 @@ def user_handler():
     device_type = data["device_type"]
     
     now = datetime.now()
-    formatted_now = now.strftime("%d-%m-%Y %H:%M:%S")
+    formatted_now = now.strftime("%Y-%m-%d %H:%M:%S")
     created_date = formatted_now
     updated_date = formatted_now
     
