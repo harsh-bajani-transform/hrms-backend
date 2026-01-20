@@ -1,7 +1,7 @@
 # routes/dashboard.py
 
 from flask import Blueprint, request
-from config import get_db_connection,UPLOAD_FOLDER, UPLOAD_SUBDIRS
+from config import get_db_connection, UPLOAD_FOLDER, UPLOAD_SUBDIRS
 from utils.response import api_response
 
 dashboard_bp = Blueprint("dashboard", __name__, url_prefix="/dashboard")
@@ -35,10 +35,23 @@ def get_user_role(cursor, user_id: int) -> str | None:
 
 
 def multi_id_match_sql(col: str) -> str:
+    """
+    Matches multi-value TEXT stored like:
+      [78] / [78,81] / "78,81" / "78"
+    by:
+      - exact equality
+      - FIND_IN_SET against cleaned CSV-like content
+    """
     cleaned = f"REPLACE(REPLACE(REPLACE(REPLACE({col}, '[', ''), ']', ''), CHAR(34), ''), ' ', '')"
     return f"({col} = %s OR FIND_IN_SET(%s, {cleaned}) > 0)"
 
 
+def user_multi_id_match_sql(col: str) -> str:
+    """
+    Same as multi_id_match_sql but used for tfs_user columns like tu.qa_id (TEXT)
+    """
+    cleaned = f"REPLACE(REPLACE(REPLACE(REPLACE({col}, '[', ''), ']', ''), CHAR(34), ''), ' ', '')"
+    return f"({col} = %s OR FIND_IN_SET(%s, {cleaned}) > 0)"
 
 
 def scope_for_logged_in_user(role: str, logged_in_user_id: int, params: list) -> str:
@@ -46,15 +59,13 @@ def scope_for_logged_in_user(role: str, logged_in_user_id: int, params: list) ->
     Visibility scope of LOGGED-IN user.
 
     IMPORTANT:
-    - QA / Project Manager / Assistant Manager scope is decided by PROJECT assignment columns:
-        p.project_qa_id
-        p.project_manager_id
-        p.asst_project_manager_id
-      These columns can be multi-value TEXT like [78] / [78,81] etc.
+    - Project Manager / Assistant Manager scope is PROJECT-wise (project table multi-id fields).
+    - QA scope is USER-wise using tfs_user.qa_id (agents mapped under QA) ✅ FIXED.
 
     Applied on aliases:
       - p (project)
       - twt (task_work_tracker)
+      - u (tfs_user of tracker row)
     """
     role = (role or "").strip().lower()
     v = str(logged_in_user_id)
@@ -68,17 +79,17 @@ def scope_for_logged_in_user(role: str, logged_in_user_id: int, params: list) ->
         params.append(int(logged_in_user_id))
         return " AND twt.user_id = %s"
 
-    # QA scope (project-wise)
+    # ✅ QA scope (USER-wise): show trackers of agents whose tfs_user.qa_id contains logged_in_user_id
     if role == "qa":
         params.extend([v, v])
-        return " AND " + multi_id_match_sql("p.project_qa_id")
+        return " AND " + user_multi_id_match_sql("u.qa_id")
 
-    # Project manager scope (project-wise)
-    if role in ["manager", "project manager"]:
+    # Project manager scope (PROJECT-wise)
+    if role in ["manager", "project manager", "product manager"]:
         params.extend([v, v])
         return " AND " + multi_id_match_sql("p.project_manager_id")
 
-    # Assistant manager scope (project-wise)
+    # Assistant manager scope (PROJECT-wise)
     if role == "assistant manager":
         params.extend([v, v])
         return " AND " + multi_id_match_sql("p.asst_project_manager_id")
@@ -229,8 +240,6 @@ def dashboard_filter():
             tasks = cursor.fetchall()
 
             # Billable hours (project-wise) for ALL projects
-            # If twt.billable_hours is TEXT, use CAST:
-            # COALESCE(SUM(CAST(twt.billable_hours AS DECIMAL(10,2))), 0)
             cursor.execute(
                 """
                 SELECT
@@ -269,7 +278,9 @@ def dashboard_filter():
         # CASE 2: Role scope + optional filters (tracker-driven)
         # ----------------------------------------------------------
         base_from = """
-            FROM task_work_tracker twt JOIN tfs_user u ON u.user_id = twt.user_id JOIN project p ON p.project_id = twt.project_id
+            FROM task_work_tracker twt
+            JOIN tfs_user u ON u.user_id = twt.user_id
+            JOIN project p ON p.project_id = twt.project_id
         """
 
         where_sql = """
@@ -307,7 +318,6 @@ def dashboard_filter():
             {where_sql}
             ORDER BY u.user_id DESC
         """
-        # print(users_query)
         cursor.execute(users_query, tuple(params))
         users = cursor.fetchall()
 
@@ -380,15 +390,13 @@ def dashboard_filter():
             ORDER BY {TRACKER_DT} DESC
             LIMIT 500
         """
-        # print(tracker_query)
         cursor.execute(tracker_query, tuple(params))
         tracker_rows = cursor.fetchall()
-        
+
         tracker_files_url = f"{UPLOAD_FOLDER}/{UPLOAD_SUBDIRS['TRACKER_FILES']}/"
-        tracker_file_temp = ""
         for t in tracker_rows:
             tracker_file_temp = t.get("tracker_file")
-            if t.get("tracker_file"):
+            if tracker_file_temp:
                 t["tracker_file"] = tracker_files_url + tracker_file_temp
             else:
                 t["tracker_file"] = None
@@ -396,8 +404,6 @@ def dashboard_filter():
         # --------------------
         # BILLABLE HOURS (project-wise) within SAME scope/filters
         # --------------------
-        # If twt.billable_hours is TEXT, use CAST:
-        # COALESCE(SUM(CAST(twt.billable_hours AS DECIMAL(10,2))), 0)
         billable_query = f"""
             SELECT
                 p.project_id,

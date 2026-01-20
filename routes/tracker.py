@@ -134,49 +134,89 @@ def update_tracker():
 @tracker_bp.route("/view", methods=["POST"])
 def view_trackers():
     data = request.get_json() or {}
-    # print(data)
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        query = "SELECT *, production / tenure_target as billable_hours FROM task_work_tracker WHERE is_active != 0"
+        query = """
+            SELECT 
+                twt.*,
+                u.user_name,
+                (twt.production / twt.tenure_target) AS billable_hours
+            FROM task_work_tracker twt
+            LEFT JOIN tfs_user u ON u.user_id = twt.user_id
+            WHERE twt.is_active != 0
+        """
+
         params = []
 
+        logged_in_user_id = data.get("logged_in_user_id")  # manager id
+        role_name = (data.get("role_name") or "").strip().lower()
+
+        # 1) If specific user_id requested -> keep your same logic
         if data.get("user_id"):
-            query += " AND user_id=%s"
+            query += " AND twt.user_id=%s"
             params.append(data["user_id"])
 
+        # 2) Else apply manager restriction (unless admin)
+        else:
+            if role_name == "admin":
+                pass  # admin sees all
+
+            elif logged_in_user_id:
+                # Ensure it's string because your manager columns are TEXT
+                manager_id_str = str(logged_in_user_id)
+
+                query += """
+                    AND twt.user_id IN (
+                        SELECT tu.user_id
+                        FROM tfs_user tu
+                        WHERE tu.is_active = 1
+                          AND tu.is_delete = 1
+                          AND (
+                                tu.project_manager_id = %s
+                                OR tu.asst_manager_id = %s
+                                OR tu.qa_id = %s
+                                OR tu.user_id = %s
+                                OR FIND_IN_SET(%s, REPLACE(tu.project_manager_id, ' ', '')) > 0
+                                OR FIND_IN_SET(%s, REPLACE(tu.asst_manager_id, ' ', '')) > 0
+                                OR FIND_IN_SET(%s, REPLACE(tu.qa_id, ' ', '')) > 0
+                          )
+                    )
+                """
+                params.extend([manager_id_str, manager_id_str, manager_id_str, manager_id_str, manager_id_str, manager_id_str, manager_id_str])
+
+        # existing filters (same logic, prefixed with twt.)
         if data.get("project_id"):
-            query += " AND project_id=%s"
+            query += " AND twt.project_id=%s"
             params.append(data["project_id"])
 
         if data.get("task_id"):
-            query += " AND task_id=%s"
+            query += " AND twt.task_id=%s"
             params.append(data["task_id"])
 
         if data.get("date_from"):
-            query += " AND date_time >= %s"
+            query += " AND twt.date_time >= %s"
             params.append(data["date_from"])
 
         if data.get("date_to"):
-            query += " AND date_time <= %s"
+            query += " AND twt.date_time <= %s"
             params.append(data["date_to"])
 
         if data.get("is_active") is not None:
-            query += " AND is_active=%s"
+            query += " AND twt.is_active=%s"
             params.append(data["is_active"])
 
-        query += " ORDER BY date_time DESC"
-        # print(query)
+        query += " ORDER BY twt.date_time DESC"
+
         cursor.execute(query, tuple(params))
         trackers = cursor.fetchall()
 
         tracker_files_url = f"{UPLOAD_FOLDER}/{UPLOAD_SUBDIRS['TRACKER_FILES']}/"
-        tracker_file_temp = ""
         for t in trackers:
             tracker_file_temp = t.get("tracker_file")
-            if t.get("tracker_file"):
+            if tracker_file_temp:
                 t["tracker_file"] = tracker_files_url + tracker_file_temp
             else:
                 t["tracker_file"] = None
