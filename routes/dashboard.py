@@ -377,6 +377,8 @@ def dashboard_filter():
             SELECT
                 twt.tracker_id,
                 twt.user_id,
+                twt.actual_target,
+                twt.tenure_target,
                 u.user_name,
                 twt.project_id,
                 p.project_name,
@@ -458,7 +460,9 @@ def dashboard_filter():
         )
 
     except Exception as e:
-        return api_response(500, f"Dashboard filter failed: {str(e)}")
+        import logging
+        logging.exception("Dashboard filter failed")
+        return api_response(500, "Dashboard filter failed due to an internal error.")
 
     finally:
         try:

@@ -131,6 +131,51 @@ def update_tracker():
 # ------------------------
 # VIEW TRACKERS
 # ------------------------
+# routes/tracker.py  (or wherever your tracker_bp lives)
+
+from flask import Blueprint, request
+from config import get_db_connection, UPLOAD_FOLDER, UPLOAD_SUBDIRS
+from utils.response import api_response
+
+tracker_bp = Blueprint("tracker", __name__, url_prefix="/tracker")
+
+# If your project already defines this elsewhere, reuse it.
+# task_work_tracker.date_time is TEXT like "YYYY-MM-DD HH:MM:SS"
+TRACKER_DT = "CAST(twt.date_time AS DATETIME)"
+TRACKER_YEAR_MONTH = f"(YEAR({TRACKER_DT})*100 + MONTH({TRACKER_DT}))"
+
+
+def get_role_context(cursor, user_id: int) -> dict:
+    """
+    Single helper:
+      - get logged in user's role_name
+      - get agent_role_id for filtering other APIs if needed
+    """
+    cursor.execute(
+        """
+        SELECT
+            u.role_id AS user_role_id,
+            r.role_name AS user_role_name,
+            (
+                SELECT ur2.role_id
+                FROM user_role ur2
+                WHERE LOWER(TRIM(ur2.role_name)) = 'agent'
+                LIMIT 1
+            ) AS agent_role_id
+        FROM tfs_user u
+        JOIN user_role r ON r.role_id = u.role_id
+        WHERE u.user_id=%s AND u.is_active=1 AND u.is_delete=1
+        """,
+        (int(user_id),),
+    )
+    row = cursor.fetchone() or {}
+    return {
+        "user_role_id": row.get("user_role_id"),
+        "user_role_name": (row.get("user_role_name") or "").strip().lower(),
+        "agent_role_id": row.get("agent_role_id"),
+    }
+
+
 @tracker_bp.route("/view", methods=["POST"])
 def view_trackers():
     data = request.get_json() or {}
@@ -139,24 +184,38 @@ def view_trackers():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        params = []
+
+        logged_in_user_id = data.get("logged_in_user_id")
+        if not logged_in_user_id:
+            return api_response(400, "logged_in_user_id is required")
+
+        # month_year (optional) -> default current month (MONYYYY like JAN2026)
+        month_year = (data.get("month_year") or "").strip()
+        if not month_year:
+            cursor.execute("SELECT UPPER(DATE_FORMAT(CURDATE(), '%b%Y')) AS m")
+            month_year = (cursor.fetchone() or {}).get("m") or ""
+
+        # role from DB (NOT from payload)
+        ctx = get_role_context(cursor, int(logged_in_user_id))
+        role_name = ctx["user_role_name"]
+
+        # --------------------------------------------
+        # 1) Trackers list query (your logic preserved)
+        # --------------------------------------------
         query = """
             SELECT 
                 twt.*,
                 u.user_name,
                 p.project_name,
                 tk.task_name,
-                (twt.production / twt.tenure_target) AS billable_hours
+                (twt.production / NULLIF(twt.tenure_target, 0)) AS billable_hours
             FROM task_work_tracker twt
             LEFT JOIN tfs_user u ON u.user_id = twt.user_id
             LEFT JOIN project p ON p.project_id = twt.project_id
             LEFT JOIN task tk ON tk.task_id = twt.task_id
             WHERE twt.is_active != 0
         """
-
-        params = []
-
-        logged_in_user_id = data.get("logged_in_user_id")  # manager id
-        role_name = (data.get("role_name") or "").strip().lower()
 
         # 1) If specific user_id requested -> keep your same logic
         if data.get("user_id"):
@@ -167,10 +226,8 @@ def view_trackers():
         else:
             if role_name == "admin":
                 pass  # admin sees all
-
             elif logged_in_user_id:
                 manager_id_str = str(logged_in_user_id)
-
                 query += """
                     AND twt.user_id IN (
                         SELECT tu.user_id
@@ -227,10 +284,154 @@ def view_trackers():
             else:
                 t["tracker_file"] = None
 
+        # --------------------------------------------
+        # 2) Month-wise summary (per user in result)
+        # daily_required_hours =
+        #   (monthly_total_target - achieved_month_billable_hours) / pending_days
+        # pending_days = UMT.working_days - worked_days_till_today(month-wise distinct days)
+        # --------------------------------------------
+        user_ids = sorted({t.get("user_id") for t in trackers if t.get("user_id") is not None})
+        month_summary = []
+
+        if user_ids:
+            in_ph = ",".join(["%s"] * len(user_ids))
+
+            summary_query = f"""
+                SELECT
+                    u.user_id,
+                    u.user_name,
+                    m.mon AS month_year,
+
+                    umt.user_monthly_tracker_id,
+
+                    COALESCE(CAST(umt.monthly_target AS DECIMAL(10,2)), 0) AS monthly_target,
+                    COALESCE(umt.extra_assigned_hours, 0) AS extra_assigned_hours,
+
+                    (
+                      COALESCE(CAST(umt.monthly_target AS DECIMAL(10,2)), 0)
+                      + COALESCE(umt.extra_assigned_hours, 0)
+                    ) AS monthly_total_target,
+
+                    -- achieved billable hours (month-wise)
+                    COALESCE((
+                      SELECT SUM(twt3.production / NULLIF(twt3.tenure_target, 0))
+                      FROM task_work_tracker twt3
+                      WHERE twt3.user_id = u.user_id
+                        AND twt3.is_active = 1
+                        AND (YEAR(CAST(twt3.date_time AS DATETIME))*100 + MONTH(CAST(twt3.date_time AS DATETIME))) = m.yyyymm
+                    ), 0) AS total_billable_hours_month,
+
+                    -- pending_days = working_days(from UMT) - worked_days_till_today(month-wise)
+                    CASE
+                      WHEN umt.user_monthly_tracker_id IS NULL THEN NULL
+                      ELSE GREATEST(
+                             COALESCE(CAST(umt.working_days AS SIGNED), 0)
+                             - COALESCE((
+                                 SELECT COUNT(DISTINCT DATE(CAST(twt2.date_time AS DATETIME)))
+                                 FROM task_work_tracker twt2
+                                 WHERE twt2.user_id = u.user_id
+                                   AND twt2.is_active = 1
+                                   AND (YEAR(CAST(twt2.date_time AS DATETIME))*100 + MONTH(CAST(twt2.date_time AS DATETIME))) = m.yyyymm
+                                   AND DATE(CAST(twt2.date_time AS DATETIME)) <= m.cutoff
+                               ), 0),
+                             0
+                           )
+                    END AS pending_days,
+
+                    -- daily_required_hours = (target - achieved) / pending_days
+                    CASE
+                      WHEN umt.user_monthly_tracker_id IS NULL THEN NULL
+                      WHEN GREATEST(
+                             COALESCE(CAST(umt.working_days AS SIGNED), 0)
+                             - COALESCE((
+                                 SELECT COUNT(DISTINCT DATE(CAST(twt2.date_time AS DATETIME)))
+                                 FROM task_work_tracker twt2
+                                 WHERE twt2.user_id = u.user_id
+                                   AND twt2.is_active = 1
+                                   AND (YEAR(CAST(twt2.date_time AS DATETIME))*100 + MONTH(CAST(twt2.date_time AS DATETIME))) = m.yyyymm
+                                   AND DATE(CAST(twt2.date_time AS DATETIME)) <= m.cutoff
+                               ), 0),
+                             0
+                           ) = 0 THEN NULL
+                      ELSE
+                        (
+                          (
+                            COALESCE(CAST(umt.monthly_target AS DECIMAL(10,2)), 0)
+                            + COALESCE(umt.extra_assigned_hours, 0)
+                          )
+                          - COALESCE((
+                              SELECT SUM(twt3.production / NULLIF(twt3.tenure_target, 0))
+                              FROM task_work_tracker twt3
+                              WHERE twt3.user_id = u.user_id
+                                AND twt3.is_active = 1
+                                AND (YEAR(CAST(twt3.date_time AS DATETIME))*100 + MONTH(CAST(twt3.date_time AS DATETIME))) = m.yyyymm
+                            ), 0)
+                        )
+                        / NULLIF(
+                            GREATEST(
+                              COALESCE(CAST(umt.working_days AS SIGNED), 0)
+                              - COALESCE((
+                                  SELECT COUNT(DISTINCT DATE(CAST(twt2.date_time AS DATETIME)))
+                                  FROM task_work_tracker twt2
+                                  WHERE twt2.user_id = u.user_id
+                                    AND twt2.is_active = 1
+                                    AND (YEAR(CAST(twt2.date_time AS DATETIME))*100 + MONTH(CAST(twt2.date_time AS DATETIME))) = m.yyyymm
+                                    AND DATE(CAST(twt2.date_time AS DATETIME)) <= m.cutoff
+                                ), 0),
+                              0
+                            ),
+                            0
+                          )
+                    END AS daily_required_hours
+
+                FROM tfs_user u
+
+                -- month context computed once
+                CROSS JOIN (
+                    SELECT
+                      %s AS mon,
+                      CAST(DATE_FORMAT(STR_TO_DATE(CONCAT('01-', %s), '%d-%b%Y'), '%Y%m') AS UNSIGNED) AS yyyymm,
+                      CASE
+                        WHEN (YEAR(CURDATE())*100 + MONTH(CURDATE())) =
+                             CAST(DATE_FORMAT(STR_TO_DATE(CONCAT('01-', %s), '%d-%b%Y'), '%Y%m') AS UNSIGNED)
+                        THEN CURDATE()
+                        WHEN (YEAR(CURDATE())*100 + MONTH(CURDATE())) >
+                             CAST(DATE_FORMAT(STR_TO_DATE(CONCAT('01-', %s), '%d-%b%Y'), '%Y%m') AS UNSIGNED)
+                        THEN LAST_DAY(STR_TO_DATE(CONCAT('01-', %s), '%d-%b%Y'))
+                        ELSE DATE_SUB(STR_TO_DATE(CONCAT('01-', %s), '%d-%b%Y'), INTERVAL 1 DAY)
+                      END AS cutoff
+                ) m
+
+                LEFT JOIN user_monthly_tracker umt
+                  ON umt.user_id = u.user_id
+                 AND umt.is_active = 1
+                 AND umt.month_year = m.mon
+
+                WHERE u.user_id IN ({in_ph})
+            """
+
+            # month_year params only for CROSS JOIN context, then user_ids
+            summary_params = [
+                month_year,  # m.mon
+                month_year,  # yyyymm
+                month_year,  # cutoff compare (==)
+                month_year,  # cutoff compare (>)
+                month_year,  # LAST_DAY
+                month_year,  # future-case start
+            ] + user_ids
+
+            cursor.execute(summary_query, tuple(summary_params))
+            month_summary = cursor.fetchall()
+
         return api_response(
             200,
             "Trackers fetched successfully",
-            {"count": len(trackers), "trackers": trackers}
+            {
+                "count": len(trackers),
+                "month_year": month_year,
+                "trackers": trackers,
+                "month_summary": month_summary,
+            },
         )
 
     except Exception as e:
@@ -239,6 +440,8 @@ def view_trackers():
     finally:
         cursor.close()
         conn.close()
+
+
 
 
 # ------------------------
