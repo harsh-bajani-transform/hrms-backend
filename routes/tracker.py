@@ -2,6 +2,7 @@ from flask import Blueprint, request
 from config import get_db_connection,UPLOAD_FOLDER, UPLOAD_SUBDIRS
 from utils.response import api_response
 from utils.file_utils import save_base64_file
+from utils.api_log_utils import log_api_call
 from datetime import datetime
 import os
 # from flask_cors import cross_origin
@@ -65,6 +66,11 @@ def add_tracker():
 
         conn.commit()
         tracker_id = cursor.lastrowid
+        # Log only on success
+        device_id = data.get("device_id")
+        device_type = data.get("device_type")
+        api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_api_call("add_tracker", user_id, device_id, device_type, api_call_time)
         return api_response(201, "Tracker added successfully", {"tracker_id": tracker_id})
 
     except Exception as e:
@@ -119,6 +125,11 @@ def update_tracker():
         """, (new_user_id, production, actual_target, tenure_target, tracker_file, tracker_file_base64, updated_date, tracker_id))
 
         conn.commit()
+        # Log only on success
+        device_id = data.get("device_id")
+        device_type = data.get("device_type")
+        api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_api_call("update_tracker", tracker["user_id"], device_id, device_type, api_call_time)
         return api_response(200, "Tracker updated successfully")
 
     except Exception as e:
@@ -183,7 +194,7 @@ def view_trackers():
             return api_response(400, "logged_in_user_id is required")
 
         # month_year (optional) -> default current month (MONYYYY like JAN2026)
-        month_year = (data.get("month_year") or "").strip()
+        month_year = (data.get("month_year") or "").strip().upper()
         if not month_year:
             cursor.execute("SELECT UPPER(DATE_FORMAT(CURDATE(), '%b%Y')) AS m")
             month_year = (cursor.fetchone() or {}).get("m") or ""
@@ -193,7 +204,7 @@ def view_trackers():
         role_name = ctx["user_role_name"]
 
         # --------------------------------------------
-        # 1) Trackers list query (your logic preserved)
+        # 1) Trackers list query (now with month_year filter if provided)
         # --------------------------------------------
         query = """
             SELECT 
@@ -201,13 +212,27 @@ def view_trackers():
                 u.user_name,
                 p.project_name,
                 tk.task_name,
+                t.team_name,
                 (twt.production / NULLIF(twt.tenure_target, 0)) AS billable_hours
             FROM task_work_tracker twt
             LEFT JOIN tfs_user u ON u.user_id = twt.user_id
             LEFT JOIN project p ON p.project_id = twt.project_id
             LEFT JOIN task tk ON tk.task_id = twt.task_id
+            LEFT JOIN team t ON u.team_id = t.team_id
             WHERE twt.is_active != 0
         """
+        # Add month_year filter to main tracker list if provided
+        if month_year:
+            from datetime import datetime
+            try:
+                dt = datetime.strptime(month_year, "%b%Y")
+                year = dt.year
+                month = dt.month
+                query += " AND YEAR(twt.date_time) = %s AND MONTH(twt.date_time) = %s"
+                params.append(year)
+                params.append(month)
+            except Exception:
+                pass
 
         # 1) If specific user_id requested -> keep your same logic
         if data.get("user_id"):
@@ -216,7 +241,7 @@ def view_trackers():
 
         # 2) Else apply manager restriction (unless admin)
         else:
-            if role_name == "admin":
+            if role_name == "admin" or role_name == "super admin":
                 pass  # admin sees all
             elif logged_in_user_id:
                 manager_id_str = str(logged_in_user_id)
@@ -407,7 +432,7 @@ def view_trackers():
 
                 WHERE u.user_id IN ({in_ph})
             """
-
+            
             # month_year params only for CROSS JOIN context, then user_ids
             summary_params = [
                 month_year,  # m.mon
@@ -420,6 +445,12 @@ def view_trackers():
 
             cursor.execute(summary_query, tuple(summary_params))
             month_summary = cursor.fetchall()
+
+            device_id = data.get("device_id")
+            device_type = data.get("device_type")
+            api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_api_call("view_trackers", logged_in_user_id, device_id, device_type, api_call_time)
+        
 
         return api_response(
             200,
@@ -475,6 +506,11 @@ def delete_tracker():
         """, (tracker_id,))
 
         conn.commit()
+        # Log only on success
+        device_id = data.get("device_id")
+        device_type = data.get("device_type")
+        api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_api_call("delete_tracker", tracker["user_id"], device_id, device_type, api_call_time)
         return api_response(200, "Tracker deleted successfully")
 
     except Exception as e:

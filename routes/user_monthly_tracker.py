@@ -322,10 +322,7 @@ def list_user_monthly_targets():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # Default month_year if not provided -> current month (e.g., JAN2026)
-        if not month_year:
-            cursor.execute("SELECT UPPER(DATE_FORMAT(CURDATE(), '%b%Y')) AS m")
-            month_year = (cursor.fetchone() or {}).get("m") or ""
+        # If month_year is not provided, do not filter by month (show all data)
 
         ctx = get_role_context(cursor, int(logged_in_user_id))
         my_role_name = ctx["user_role_name"]
@@ -346,7 +343,7 @@ def list_user_monthly_targets():
             user_where += " AND u.user_id=%s"
             user_params.append(int(filter_user_id))
 
-        if my_role_name == "admin":
+        if my_role_name == "admin" or my_role_name == "super admin":
             pass
         elif my_role_name == "agent":
             user_where += " AND u.user_id=%s"
@@ -365,42 +362,48 @@ def list_user_monthly_targets():
             """
             user_params.extend([mid, mid, mid, mid, mid, mid])
 
-        # Joins (month_year is always set now due to default)
-        umt_join = """
-            LEFT JOIN user_monthly_tracker umt
-              ON umt.user_id = u.user_id
-             AND umt.is_active=1
-             AND umt.month_year=%s
-        """
-
-        twt_join = f"""
-            LEFT JOIN task_work_tracker twt
-              ON twt.user_id = u.user_id
-             AND twt.is_active=1
-             AND {TRACKER_YEAR_MONTH} = {month_year_to_yyyymm_sql('%s')}
-        """
+        # Joins: if month_year is provided, filter by month; else, join without month filter
+        if month_year:
+            umt_join = """
+                LEFT JOIN user_monthly_tracker umt
+                  ON umt.user_id = u.user_id
+                 AND umt.is_active=1
+                 AND umt.month_year=%s
+            """
+            twt_join = f"""
+                LEFT JOIN task_work_tracker twt
+                  ON twt.user_id = u.user_id
+                 AND twt.is_active=1
+                 AND {TRACKER_YEAR_MONTH} = {month_year_to_yyyymm_sql('%s')}
+            """
+        else:
+            umt_join = """
+                LEFT JOIN user_monthly_tracker umt
+                  ON umt.user_id = u.user_id
+                 AND umt.is_active=1
+            """
+            twt_join = f"""
+                LEFT JOIN task_work_tracker twt
+                  ON twt.user_id = u.user_id
+                 AND twt.is_active=1
+            """
 
         query = f"""
             SELECT
                 u.user_id,
                 u.user_name,
-
+                t.team_name,
                 umt.user_monthly_tracker_id,
-                COALESCE(umt.month_year, %s) AS month_year,
-
+                umt.month_year,
                 COALESCE(CAST(umt.monthly_target AS DECIMAL(10,2)), 0) AS monthly_target,
                 COALESCE(umt.extra_assigned_hours, 0) AS extra_assigned_hours,
-
                 (
                     COALESCE(CAST(umt.monthly_target AS DECIMAL(10,2)), 0)
                     + COALESCE(umt.extra_assigned_hours, 0)
                 ) AS monthly_total_target,
-
                 COALESCE(SUM(twt.billable_hours), 0) AS total_billable_hours,
                 COALESCE(SUM(twt.production), 0) AS total_production,
                 COUNT(twt.tracker_id) AS tracker_rows,
-
-                -- ✅ NEW: pending target
                 GREATEST(
                     (
                         COALESCE(CAST(umt.monthly_target AS DECIMAL(10,2)), 0)
@@ -408,28 +411,20 @@ def list_user_monthly_targets():
                     ) - COALESCE(SUM(twt.billable_hours), 0),
                     0
                 ) AS pending_target
-
             FROM tfs_user u
+            LEFT JOIN team t ON u.team_id = t.team_id
             {umt_join}
             {twt_join}
             {user_where}
-
             GROUP BY u.user_id, umt.user_monthly_tracker_id
             ORDER BY u.user_name ASC
         """
-
-        # Params order:
-        # umt.month_year=%s
-        # tracker month_year=%s
-        # COALESCE(umt.month_year, %s)
-        # plus user_where params
-        final_params = [
-            month_year,  # umt_join
-            month_year,  # twt_join
-            month_year,  # COALESCE month_year
-        ]
+        # Params order: if month_year is provided, pass it; else, only user_where params
+        if month_year:
+            final_params = [month_year, month_year]
+        else:
+            final_params = []
         final_params.extend(user_params)
-
         cursor.execute(query, tuple(final_params))
         rows = cursor.fetchall()
         return api_response(200, "User monthly targets fetched successfully", rows)
