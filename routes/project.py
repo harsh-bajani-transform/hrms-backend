@@ -298,8 +298,8 @@ def list_projects():
 
             project_file_url = None
             if proj.get("project_pprt"):
-                project_file_url = f"{UPLOAD_FOLDER}/{UPLOAD_SUBDIRS['PROJECT_PPRT']}/"
-                # project_file_url = os.path.join("/uploads", UPLOAD_SUBDIRS["PROJECT_PPRT"], proj["project_pprt"])
+                from config import BASE_UPLOAD_URL
+                project_file_url = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROJECT_PPRT']}/{proj['project_pprt']}"
             # print(proj)
             result.append(
                 {

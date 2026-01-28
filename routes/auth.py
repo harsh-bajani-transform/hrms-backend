@@ -72,7 +72,8 @@ def user_handler():
             
             if user["profile_picture"] :
                 filename = user.get("profile_picture")
-                user["profile_picture"] =  f"{UPLOAD_URL_PREFIX}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
+                from config import BASE_UPLOAD_URL
+                user["profile_picture"] =  f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
 
             # Remove password before sending
             user.pop("user_password", None)

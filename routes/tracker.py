@@ -299,7 +299,8 @@ def view_trackers():
         cursor.execute(query, tuple(params))
         trackers = cursor.fetchall()
 
-        tracker_files_url = f"{UPLOAD_FOLDER}/{UPLOAD_SUBDIRS['TRACKER_FILES']}/"
+        from config import BASE_UPLOAD_URL
+        tracker_files_url = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['TRACKER_FILES']}/"
         for t in trackers:
             tracker_file_temp = t.get("tracker_file")
             if tracker_file_temp:
