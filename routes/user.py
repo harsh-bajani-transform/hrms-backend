@@ -111,7 +111,8 @@ def list_users():
         for u in users:
             filename = u.get("profile_picture")  # DB column
             if filename:
-                # u["profile_picture"] = f"{UPLOAD_URL_PREFIX}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
+                from config import BASE_UPLOAD_URL
+                # u["profile_picture"] = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
                 u["profile_picture"] = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
             else:
                 u["profile_picture"] = None
