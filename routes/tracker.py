@@ -232,14 +232,23 @@ def view_trackers():
         role_name = ctx["user_role_name"]
 
         # 1) Trackers list query
-        query = """
+        query = f"""
             SELECT 
-                twt.*,
-                u.user_name,
-                p.project_name,
-                tk.task_name,
-                t.team_name,
-                (twt.production / NULLIF(twt.tenure_target, 0)) AS billable_hours
+                MAX(twt.tracker_id) AS tracker_id,
+                twt.user_id,
+                twt.project_id,
+                twt.task_id,
+                SUM(twt.production) AS production,
+                MAX(twt.actual_target) AS actual_target,
+                MAX(twt.tenure_target) AS tenure_target,
+                SUM(twt.production / NULLIF(twt.tenure_target, 0)) AS billable_hours,
+                MAX(twt.date_time) AS date_time,
+                MAX(twt.updated_date) AS updated_date,
+                MAX(twt.tracker_file) AS tracker_file,
+                MAX(u.user_name) AS user_name,
+                MAX(p.project_name) AS project_name,
+                MAX(tk.task_name) AS task_name,
+                MAX(t.team_name) AS team_name
             FROM task_work_tracker twt
             LEFT JOIN tfs_user u ON u.user_id = twt.user_id
             LEFT JOIN project p ON p.project_id = twt.project_id
@@ -335,7 +344,8 @@ def view_trackers():
             query += " AND twt.is_active=%s"
             params.append(data["is_active"])
 
-        query += " ORDER BY twt.date_time DESC"
+        query += f" GROUP BY DATE({TRACKER_DT}), twt.user_id, twt.project_id, twt.task_id"
+        query += " ORDER BY date_time DESC"
 
         cursor.execute(query, tuple(params))
         trackers = cursor.fetchall()
