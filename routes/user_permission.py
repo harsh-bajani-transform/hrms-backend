@@ -149,7 +149,7 @@ def update_user_permission():
         # 3) Check target user exists
         # --------------------------------------------------
         cursor.execute("""
-            SELECT user_id, project_manager_id, asst_manager_id
+            SELECT user_id, project_manager_id, asst_manager_id, role_id
             FROM tfs_user
             WHERE user_id = %s AND is_active = 1 AND is_delete = 1
         """, (target_user_id,))
@@ -200,10 +200,11 @@ def update_user_permission():
         else:
             cursor.execute("""
                 INSERT INTO user_permission
-                (user_id, project_creation_permission, user_creation_permission)
-                VALUES (%s, %s, %s)
+                (user_id, role_id, project_creation_permission, user_creation_permission)
+                VALUES (%s, %s, %s, %s)
             """, (
                 target_user_id,
+                target_user["role_id"],
                 project_perm or 0,
                 user_perm or 0
             ))
