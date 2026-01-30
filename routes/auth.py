@@ -72,7 +72,6 @@ def user_handler():
             
             if user["profile_picture"] :
                 filename = user.get("profile_picture")
-
                 # user["profile_picture"] =  f"{UPLOAD_URL_PREFIX}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
                 user["profile_picture"] =  f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
 
