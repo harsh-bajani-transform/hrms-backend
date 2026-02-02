@@ -137,8 +137,9 @@ def user_handler():
     profile_picture_base64 = data.get("profile_picture")
     # profile_picture = data.get("profile_picture")
 
-    if profile_picture_base64 :
-        profile_picture = save_base64_image_as_webp(profile_picture_base64,user_name)
+    profile_picture = None
+    if profile_picture_base64:
+        profile_picture = save_base64_image_as_webp(profile_picture_base64, user_name)
         
     # hashed_password = hash_password(user_password)
 
