@@ -8,136 +8,160 @@ from utils.validators import (
     is_valid_password,
     is_valid_phone
 )
-from utils.security import hash_password
-from utils.security import verify_password
-from utils.image_utils import save_base64_image_as_webp
-# from app import BASE_URL
 from utils.validators import validate_request
+import json
+import re
 
 auth_bp = Blueprint("auth", __name__)
 
+def _to_id_array_json(val):
+    if val is None:
+        return json.dumps([])
+    if isinstance(val, str) and val.strip() == "":
+        return json.dumps([])
+    if isinstance(val, list):
+        cleaned = []
+        for x in val:
+            if x is None:
+                continue
+            s = str(x).strip()
+            if s.isdigit():
+                cleaned.append(int(s))
+        return json.dumps(cleaned)
+    if isinstance(val, int):
+        return json.dumps([val])
+    if isinstance(val, str):
+        s = val.strip()
+        if s.isdigit():
+            return json.dumps([int(s)])
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                cleaned = []
+                for x in parsed:
+                    s2 = str(x).strip()
+                    if s2.isdigit():
+                        cleaned.append(int(s2))
+                return json.dumps(cleaned)
+            if isinstance(parsed, int):
+                return json.dumps([parsed])
+            if isinstance(parsed, str) and parsed.strip().isdigit():
+                return json.dumps([int(parsed.strip())])
+        except Exception:
+            pass
+    return json.dumps([])
+
+def safe_filename_part(value: str) -> str:
+    if value is None:
+        return "NA"
+    s = str(value).strip()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^A-Za-z0-9_]", "", s)
+    return s or "NA"
+
+def build_profile_pic_filename(user_name: str, original_filename: str) -> str:
+    if "." not in (original_filename or ""):
+        raise ValueError("Uploaded file has no extension")
+    ext = original_filename.rsplit(".", 1)[1].lower().strip()
+
+    now = datetime.now()
+    date_part = now.strftime("%d-%b-%Y")   # 05-Feb-2026
+    time_part = now.strftime("%I%p")       # 10AM / 09PM
+    return f"{safe_filename_part(user_name)}_{date_part}_{time_part}.{ext}"
+
 @auth_bp.route("/user", methods=["POST"])
 def user_handler():
-    UPLOAD_URL_PREFIX = "/uploads"
-    data, err = validate_request(allow_empty_json=False)
-    if err:
-        return err
-    
-    is_login_request = set(data.keys()) == {"user_email", "user_password", "device_id", "device_type"}
-    
-    # LOGIN 
-    if is_login_request:
-        data, err = validate_request(required=["user_email", "user_password"])
+
+    # -------------------------
+    # Detect request type
+    # -------------------------
+    is_multipart = (request.content_type or "").startswith("multipart/form-data")
+
+    # =========================================================
+    # LOGIN (JSON only)
+    # =========================================================
+    if not is_multipart:
+        data, err = validate_request(allow_empty_json=False)
         if err:
             return err
+
+        is_login_request = set(data.keys()) == {"user_email", "user_password", "device_id", "device_type"}
+        if not is_login_request:
+            return api_response(400, "Invalid request format for login")
 
         user_email = data["user_email"].strip().lower()
         user_password = data["user_password"]
 
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
-        
+
         try:
             cursor.execute("""
                 SELECT 
                     u.*,
-                    r.project_creation_permission,
-                    r.user_creation_permission
+                    p.project_creation_permission,
+                    p.user_creation_permission
                 FROM tfs_user u
-                LEFT JOIN user_permission r ON u.user_id = r.user_id
-                WHERE u.user_email = %s and is_active != 0 and is_delete != 0
+                LEFT JOIN user_permission p ON u.user_id = p.user_id
+                WHERE u.user_email = %s
+                  AND u.is_delete != 0
+                LIMIT 1
             """, (user_email,))
-
             user = cursor.fetchone()
-            cursor.close()
-            conn.close()
 
             if not user:
                 return api_response(401, "Invalid email or password")
 
-            if user["is_active"] != 1:
+            if user.get("is_active") != 1:
                 return api_response(403, "User account is inactive")
 
-            # Password check
-            stored_password = user["user_password"]
-            is_hashed = isinstance(stored_password, str) and (stored_password.startswith('$2b$') or stored_password.startswith('$2a$'))
-
-            password_matches = False
-            if is_hashed:
-                # For new users with hashed passwords
-                password_matches = verify_password(user_password, stored_password.encode())
-            else:
-                # For existing users with plain-text passwords
-                password_matches = (user_password == stored_password)
-                if password_matches:
-                    # Upgrade plain-text password to a hash
-                    try:
-                        hashed_password = hash_password(user_password)
-                        conn_update = get_db_connection()
-                        cursor_update = conn_update.cursor()
-                        cursor_update.execute("UPDATE tfs_user SET user_password = %s WHERE user_id = %s", (hashed_password, user['user_id']))
-                        conn_update.commit()
-                        cursor_update.close()
-                        conn_update.close()
-                    except Exception as e:
-                        # Log this error, but don't block login
-                        print(f"Could not upgrade password for user {user['user_id']}: {e}")
-
-
-            if not password_matches:
+            stored_password = user.get("user_password")
+            if stored_password is None or user_password != stored_password:
                 return api_response(401, "Invalid email or password")
-            
-            if user["profile_picture"] :
+
+            if user.get("profile_picture"):
                 filename = user.get("profile_picture")
-                # user["profile_picture"] =  f"{UPLOAD_URL_PREFIX}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
-                user["profile_picture"] =  f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
+                user["profile_picture"] = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
+            else:
+                user["profile_picture"] = None
 
-            # Remove password before sending
             user.pop("user_password", None)
-
-            # Return full flattened JSON object
             return api_response(200, "Login successful", user)
-        
-        finally :
-            cursor.close()
-            conn.close()
 
+        finally:
+            try: cursor.close()
+            except: pass
+            try: conn.close()
+            except: pass
 
-    # -----------------------------------
-    #          REGISTRATION
-    # -----------------------------------
-    
-    data, err = validate_request(required=["user_name", "user_email", "user_password", "role_id"])
-    if err:
-        return err
+    # =========================================================
+    # REGISTRATION (multipart/form-data)
+    # =========================================================
+    form = request.form
 
-    user_name = data["user_name"].strip()
-    user_email = data["user_email"].strip().lower()
-    user_password = data["user_password"]
-    role_id = data["role_id"].strip().lower()
-    
-    designation_id = data.get("designation_id")
-    project_manager = data.get("project_manager")
-    assistant_manager = data.get("assistant_manager")
-    qa = data.get("qa")
-    team = data.get("team")
-    user_tenure = data.get("user_tenure")
+    required = ["user_name", "user_email", "user_password", "role_id"]
+    for f in required:
+        if not form.get(f):
+            return api_response(400, f"{f} is required")
 
-    user_number = data.get("user_number")
-    user_address = data.get("user_address")
-    device_id = data["device_id"]
-    device_type = data["device_type"]
-    
-    now = datetime.now()
-    formatted_now = now.strftime("%Y-%m-%d %H:%M:%S")
-    created_date = formatted_now
-    updated_date = formatted_now
-    
-    is_active = 1
-    is_delete = 1
-    
+    user_name = form["user_name"].strip()
+    user_email = form["user_email"].strip().lower()
+    user_password = form["user_password"]
+    role_id = str(form["role_id"]).strip().lower()
 
-    # Validations
+    designation_id = form.get("designation_id")
+    team = form.get("team")
+    user_tenure = form.get("user_tenure")
+
+    user_number = form.get("user_number")
+    user_address = form.get("user_address")
+    device_id = form.get("device_id")
+    device_type = form.get("device_type")
+
+    project_manager = _to_id_array_json(form.get("project_manager"))
+    assistant_manager = _to_id_array_json(form.get("assistant_manager"))
+    qa = _to_id_array_json(form.get("qa"))
+
     if not is_valid_username(user_name):
         return api_response(400, "Username must contain only alphabets")
 
@@ -149,16 +173,19 @@ def user_handler():
 
     if user_number and not is_valid_phone(user_number):
         return api_response(400, "Invalid phone number")
-        
-    
-    profile_picture_base64 = data.get("profile_picture")
-    # profile_picture = data.get("profile_picture")
 
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ✅ file upload (profile_picture)
     profile_picture = None
-    if profile_picture_base64:
-        profile_picture = save_base64_image_as_webp(profile_picture_base64, user_name)
-        
-    # hashed_password = hash_password(user_password)
+    uploaded = request.files.get("profile_picture")
+    if uploaded and uploaded.filename:
+        try:
+            from utils.file_utils import save_uploaded_file
+            custom_filename = build_profile_pic_filename(user_name, uploaded.filename)
+            profile_picture = save_uploaded_file(uploaded, UPLOAD_SUBDIRS["PROFILE_PIC"], custom_filename)
+        except ValueError as e:
+            return api_response(400, str(e))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -166,7 +193,6 @@ def user_handler():
     try:
         conn.start_transaction()
 
-        # Check existing email
         cursor.execute(
             "SELECT user_id FROM tfs_user WHERE user_email=%s and is_active != 0 and is_delete != 0",
             (user_email,)
@@ -175,7 +201,6 @@ def user_handler():
             conn.rollback()
             return api_response(409, "User already exists")
 
-        # Insert into tfs_user
         cursor.execute("""
             INSERT INTO tfs_user (
                 user_name,
@@ -202,13 +227,13 @@ def user_handler():
         """, (
             user_name,
             profile_picture,
-            profile_picture_base64,
+            None,              # ✅ remove base64
             user_number,
             user_address,
             user_email,
             user_password,
-            is_active,
-            is_delete,
+            1,
+            1,
             role_id,
             designation_id,
             user_tenure,
@@ -218,32 +243,22 @@ def user_handler():
             team,
             device_id,
             device_type,
-            created_date,
-            updated_date
+            now,
+            now
         ))
 
         new_user_id = cursor.lastrowid
 
-        cursor.execute("""
-            SELECT 
-                role_name
-            FROM user_role
-            WHERE role_id = %s
-        """, (role_id,))
-
+        cursor.execute("""SELECT role_name FROM user_role WHERE role_id=%s""", (role_id,))
         role = cursor.fetchone()
-        print(role)
 
-        # Permission Logic
-        if role["role_name"] in ["qa", "agent"]:
+        if role and role.get("role_name") in ["qa", "agent"]:
             project_creation_permission = 0
             user_creation_permission = 0
         else:
             project_creation_permission = 1
             user_creation_permission = 1
 
-        print("User id : ",new_user_id)
-        # Insert into user_permission
         cursor.execute("""
             INSERT INTO user_permission (
                 role_id,
@@ -267,42 +282,7 @@ def user_handler():
         return api_response(500, f"Registration failed: {str(e)}")
 
     finally:
-        cursor.close()
-        conn.close()
-
-# @auth_bp.route('/forgot-password', methods=['POST'])
-# def forgot_password():
-    # data = request.get_json()
-    # user_email = (data.get('user_email') or '').strip().lower()
-    # if not is_valid_email(user_email):
-    #     return api_response(400, 'Invalid email format')
-
-    # conn = get_db_connection()
-    # cursor = conn.cursor(dictionary=True)
-    # cursor.execute('SELECT user_id FROM tfs_user WHERE user_email=%s AND is_active=1 AND is_delete=1', (user_email,))
-    # user = cursor.fetchone()
-    # if not user:
-    #     return api_response(404, 'No active user found with this email')
-
-    # # Generate token
-    # s = URLSafeTimedSerializer('your-secret-key')
-    # token = s.dumps(user_email, salt='password-reset-salt')
-    # reset_link = f"{}/reset-password?token={token}"
-
-    # # Send email (simple example, replace with your SMTP config)
-    # msg = MIMEMultipart()
-    # msg['From'] = 'noreply@yourdomain.com'
-    # msg['To'] = user_email
-    # msg['Subject'] = 'Password Reset Request'
-    # body = f"Click the link to reset your password: <a href='{reset_link}'>{reset_link}</a>\nThis link is valid for 1 hour."
-    # msg.attach(MIMEText(body, 'html'))
-    # try:
-    #     smtp = smtplib.SMTP('localhost')  # Or your SMTP server
-    #     smtp.sendmail(msg['From'], [msg['To']], msg.as_string())
-    #     smtp.quit()
-    # except Exception as e:
-    #     return api_response(500, f'Failed to send email: {str(e)}')
-    # finally:
-    #     cursor.close()
-    #     conn.close()
-    # return api_response(200, 'Password reset link sent to your email')
+        try: cursor.close()
+        except: pass
+        try: conn.close()
+        except: pass

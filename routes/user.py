@@ -1,55 +1,166 @@
+# routes/user.py
 from flask import Blueprint, request
 from utils.response import api_response
-from config import get_db_connection
-from config import UPLOAD_SUBDIRS, BASE_UPLOAD_URL
-import os
+from config import get_db_connection, UPLOAD_SUBDIRS, BASE_UPLOAD_URL, UPLOAD_FOLDER
 from utils.validators import validate_request
 from utils.json_utils import to_db_json
 from datetime import datetime
+import json
+import os
+import re
 
 user_bp = Blueprint("user", __name__)
 
 
+# ------------------------
+# HELPERS (existing)
+# ------------------------
+def _safe_json_list(val):
+    """
+    Converts DB value to list of ints.
+    Handles: None, '[]', '[112,113]', 112, '112'
+    """
+    if val is None:
+        return []
+
+    if isinstance(val, list):
+        return [int(x) for x in val if str(x).strip().isdigit()]
+
+    if isinstance(val, int):
+        return [val]
+
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return []
+        if s.isdigit():
+            return [int(s)]
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [int(x) for x in parsed if str(x).strip().isdigit()]
+            if isinstance(parsed, int):
+                return [parsed]
+            if isinstance(parsed, str) and parsed.isdigit():
+                return [int(parsed)]
+        except Exception:
+            return []
+
+    return []
+
+
+# ------------------------
+# ABSOLUTE URL HELPERS
+# ------------------------
+def get_public_upload_base() -> str:
+    """
+    Builds absolute base like:
+      https://tfshrms.cloud + /python/uploads
+    request.host_url already contains scheme + host + trailing slash.
+    """
+    return request.host_url.rstrip("/") + (BASE_UPLOAD_URL or "")
+
+
+def _attach_profile_picture_url(users):
+    """
+    Ensures profile_picture is returned as absolute URL.
+    """
+    base = get_public_upload_base().rstrip("/")
+    sub = str(UPLOAD_SUBDIRS["PROFILE_PIC"]).strip("/")
+
+    for u in users:
+        filename = u.get("profile_picture")
+        if filename:
+            filename = os.path.basename(str(filename))  # safety
+            u["profile_picture"] = f"{base}/{sub}/{filename}"
+        else:
+            u["profile_picture"] = None
+    return users
+
+
+# ------------------------
+# NEW: safe filename + delete helpers (user-specific, NOT in file_utils)
+# ------------------------
+def safe_filename_part(value: str) -> str:
+    if value is None:
+        return "NA"
+    s = str(value).strip()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^A-Za-z0-9_]", "", s)
+    return s or "NA"
+
+
+def build_profile_pic_filename(user_name: str, original_filename: str) -> str:
+    """
+    Format:
+      <username>_<DD-Mon-YYYY>_<HHAM/HHPM>.<ext>
+    """
+    if "." not in (original_filename or ""):
+        raise ValueError("Uploaded file has no extension")
+
+    ext = original_filename.rsplit(".", 1)[1].lower().strip()
+
+    now = datetime.now()
+    date_part = now.strftime("%d-%b-%Y")  # 05-Feb-2026
+    time_part = now.strftime("%I%p")      # 10AM / 09PM
+
+    return f"{safe_filename_part(user_name)}_{date_part}_{time_part}.{ext}"
+
+
+def safe_remove_profile_pic(filename: str) -> bool:
+    """
+    Deletes profile picture file if exists.
+    Uses commonpath() (Windows-safe containment check).
+    """
+    if not filename:
+        return False
+
+    filename = os.path.basename(str(filename))
+    profile_dir = os.path.abspath(os.path.join(UPLOAD_FOLDER, UPLOAD_SUBDIRS["PROFILE_PIC"]))
+    abs_path = os.path.abspath(os.path.join(profile_dir, filename))
+
+    # containment check
+    if os.path.commonpath([profile_dir, abs_path]) != profile_dir:
+        raise ValueError("Invalid file path")
+
+    if os.path.exists(abs_path):
+        os.remove(abs_path)
+        return True
+
+    return False
+
+
+# ------------------------
+# LIST USERS
+# ------------------------
 @user_bp.route("/list", methods=["POST"])
 def list_users():
-    
     data, err = validate_request(required=["user_id"])
     if err:
         return err
-        
+
     user_id = data.get("user_id")
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
-    UPLOAD_URL_PREFIX = "/uploads" 
-    
+
     try:
-        # --------------------------------------------------
-        # 1. Get role of requesting user
-        # --------------------------------------------------
         cursor.execute("""
             SELECT r.role_name
             FROM tfs_user u
             JOIN user_role r ON r.role_id = u.role_id
-            WHERE u.user_id = %s AND u.is_active = 1 and is_delete = 1
+            WHERE u.user_id = %s AND u.is_active = 1 AND u.is_delete = 1
         """, (user_id,))
         role_row = cursor.fetchone()
 
         if not role_row:
             return api_response(404, "User not found")
 
-        role = role_row["role_name"].lower()
+        role = (role_row["role_name"] or "").lower()
 
-        # --------------------------------------------------
-        # 2. Agent → no users
-        # --------------------------------------------------
         if role == "agent":
             return api_response(200, "No users available", [])
 
-        # --------------------------------------------------
-        # 3. Base query
-        # --------------------------------------------------
         query = """
             SELECT
                 u.user_id,
@@ -61,60 +172,70 @@ def list_users():
                 u.user_tenure,
                 u.profile_picture,
                 u.is_active,
-
+                u.project_manager_id,
+                u.asst_manager_id,
+                u.qa_id,
                 r.role_name AS role,
                 t.team_name,
                 d.designation_id,
-                d.designation,
-
-                pm.user_name AS project_manager,
-                am.user_name AS asst_manager,
-                qa.user_name AS qa
-
+                d.designation
             FROM tfs_user u
             LEFT JOIN user_role r ON r.role_id = u.role_id
             LEFT JOIN user_designation d ON d.designation_id = u.designation_id
-            left join team t on u.team_id = t.team_id
-
-            LEFT JOIN tfs_user pm ON pm.user_id = u.project_manager_id
-            LEFT JOIN tfs_user am ON am.user_id = u.asst_manager_id
-            LEFT JOIN tfs_user qa ON qa.user_id = u.qa_id
-
+            LEFT JOIN team t ON u.team_id = t.team_id
             WHERE u.is_delete = 1
         """
 
         params = []
 
-        # --------------------------------------------------
-        # 4. Role-based filtering
-        # --------------------------------------------------
+        # Role-based filtering
         if role == "qa":
-            query += " AND u.qa_id = %s"
-            params.append(user_id)
-
+            query += " AND JSON_CONTAINS(COALESCE(u.qa_id, '[]'), %s)"
+            params.append(str(user_id))
         elif role == "assistant manager":
-            query += " AND u.asst_manager_id = %s"
-            params.append(user_id)
-
+            query += " AND JSON_CONTAINS(COALESCE(u.asst_manager_id, '[]'), %s)"
+            params.append(str(user_id))
         elif role == "manager":
-            query += " AND u.project_manager_id = %s"
-            params.append(user_id)
-
-        # admin / super admin → no extra filter
+            query += " AND JSON_CONTAINS(COALESCE(u.project_manager_id, '[]'), %s)"
+            params.append(str(user_id))
 
         query += " ORDER BY u.user_id DESC"
-        # print(query)
 
         cursor.execute(query, params)
         users = cursor.fetchall()
-        
+
+        # Resolve project/asst/qa names
+        all_ref_ids = set()
         for u in users:
-            filename = u.get("profile_picture")  # DB column
-            if filename:
-                # u["profile_picture"] = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
-                u["profile_picture"] = f"{BASE_UPLOAD_URL}/{UPLOAD_SUBDIRS['PROFILE_PIC']}/{filename}"
-            else:
-                u["profile_picture"] = None
+            all_ref_ids.update(_safe_json_list(u.get("project_manager_id")))
+            all_ref_ids.update(_safe_json_list(u.get("asst_manager_id")))
+            all_ref_ids.update(_safe_json_list(u.get("qa_id")))
+
+        id_to_user = {}
+        if all_ref_ids:
+            placeholders = ", ".join(["%s"] * len(all_ref_ids))
+            cursor.execute(
+                f"SELECT user_id, user_name FROM tfs_user WHERE user_id IN ({placeholders})",
+                tuple(all_ref_ids)
+            )
+            rows = cursor.fetchall()
+            id_to_user = {int(r["user_id"]): r["user_name"] for r in rows}
+
+        for u in users:
+            pm_ids = _safe_json_list(u.get("project_manager_id"))
+            am_ids = _safe_json_list(u.get("asst_manager_id"))
+            qa_ids = _safe_json_list(u.get("qa_id"))
+
+            u["project_managers"] = [{"user_id": i, "user_name": id_to_user.get(i)} for i in pm_ids]
+            u["asst_managers"] = [{"user_id": i, "user_name": id_to_user.get(i)} for i in am_ids]
+            u["qas"] = [{"user_id": i, "user_name": id_to_user.get(i)} for i in qa_ids]
+
+            u["project_manager_names"] = ", ".join([id_to_user.get(i) for i in pm_ids if id_to_user.get(i)]) or None
+            u["asst_manager_names"] = ", ".join([id_to_user.get(i) for i in am_ids if id_to_user.get(i)]) or None
+            u["qa_names"] = ", ".join([id_to_user.get(i) for i in qa_ids if id_to_user.get(i)]) or None
+
+        # ✅ absolute url
+        _attach_profile_picture_url(users)
 
         return api_response(200, "Users fetched successfully", users)
 
@@ -122,94 +243,101 @@ def list_users():
         return api_response(500, f"Failed to fetch users: {str(e)}")
 
     finally:
-        cursor.close()
-        conn.close()
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
-        
-@user_bp.route("/update_user", methods=["PUT"])
+
+# ------------------------
+# UPDATE USER (multipart/form-data for file)
+# ------------------------
+@user_bp.route("/update_user", methods=["POST"])
 def update_user():
-    data = request.get_json()
-    # print(data)
-
-    if not data:
-        return api_response(400, "Invalid JSON or no body received")
-
-    # Required field
-    user_id = data.get("user_id")
+    form = request.form
+    user_id = form.get("user_id")
     if not user_id:
         return api_response(400, "user_id is required")
 
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
-        # -------------------------------------------------------
-        # 1. Dynamic UPDATE for tfs_user
-        # -------------------------------------------------------
+        cursor.execute("SELECT user_id, user_name, profile_picture FROM tfs_user WHERE user_id=%s", (user_id,))
+        existing = cursor.fetchone()
+        if not existing:
+            return api_response(404, "User not found")
+
+        old_profile_file = existing.get("profile_picture")
+        existing_name = existing.get("user_name") or "USER"
+
         user_fields = {
-            "user_name": data.get("user_name"),
-            "user_number": data.get("user_number"),
-            "user_address": data.get("user_address"),
-            "role_id": data.get("role_id"),
-            "designation_id": data.get("designation_id"),
-            "reporting_manager": data.get("reporting_manager"),
-            "is_active": data.get("is_active"),
-            "user_tenure": data.get("user_tenure"),
-            "team_id": data.get("team_id"),
-            
-            # ✅ JSON columns (store as JSON)
-            "project_manager_id": data.get("project_manager_id"),
-            "asst_manager_id": to_db_json(data.get("asst_manager_id"), allow_single=True),
-            "qa_id": to_db_json(data.get("qa_id"), allow_single=True)
+            "user_name": form.get("user_name"),
+            "user_number": form.get("user_number"),
+            "user_address": form.get("user_address"),
+            "role_id": form.get("role_id"),
+            "designation_id": form.get("designation_id"),
+            "reporting_manager": form.get("reporting_manager"),
+            "is_active": form.get("is_active"),
+            "user_tenure": form.get("user_tenure"),
+            "team_id": form.get("team_id"),
+            "project_manager_id": to_db_json(form.get("project_manager_id"), allow_single=True),
+            "asst_manager_id": to_db_json(form.get("asst_manager_id"), allow_single=True),
+            "qa_id": to_db_json(form.get("qa_id"), allow_single=True),
         }
-        
+
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_update_cols = []
         user_update_vals = []
 
+        # --- file handling
+        uploaded = request.files.get("profile_picture")
+        if uploaded and uploaded.filename:
+            from utils.file_utils import save_uploaded_file  # generic
+
+            use_name = (form.get("user_name") or existing_name)
+            custom_filename = build_profile_pic_filename(use_name, uploaded.filename)
+
+            # save new first
+            new_filename = save_uploaded_file(
+                uploaded,
+                UPLOAD_SUBDIRS["PROFILE_PIC"],
+                custom_filename
+            )
+
+            # delete old after successful save
+            try:
+                safe_remove_profile_pic(old_profile_file)
+            except Exception as e:
+                # don't fail update; but log reason
+                print("DELETE FAILED (user update):", e, "old_file=", old_profile_file)
+
+            user_fields["profile_picture"] = new_filename
+            user_fields["profile_picture_base64"] = None  # clear base64 if column exists
+
+        # build update
         for col, val in user_fields.items():
-            if val is not None:   # update only provided fields
+            if val is not None:
                 user_update_cols.append(f"{col} = %s")
                 user_update_vals.append(val)
-                user_update_cols.append("updated_date=%s")
-                user_update_vals.append(now_str)
 
-        if user_update_cols:
-            update_user_query = f"""
-                UPDATE tfs_user
-                SET {', '.join(user_update_cols)}
-                WHERE user_id = %s
-            """
-            # print(update_user_query)
-            user_update_vals.append(user_id)
-            # print(update_user_query, user_update_vals)
-            cursor.execute(update_user_query, user_update_vals)
+        if not user_update_cols:
+            return api_response(400, "No valid fields provided for update")
 
-        # -------------------------------------------------------
-        # 2. Dynamic UPDATE for user_role
-        # -------------------------------------------------------
-        role_fields = {
-            "role_name": data.get("role_name"),
-            "project_creation_permission": data.get("project_creation_permission"),
-            "user_creation_permission": data.get("user_creation_permission")
-        }
+        user_update_cols.append("updated_date = %s")
+        user_update_vals.append(now_str)
 
-        role_update_cols = []
-        role_update_vals = []
-
-        for col, val in role_fields.items():
-            if val is not None:
-                role_update_cols.append(f"{col} = %s")
-                role_update_vals.append(val)
-
-        if role_update_cols:
-            update_role_query = f"""
-                UPDATE user_role
-                SET {', '.join(role_update_cols)}
-                WHERE user_id = %s
-            """
-            role_update_vals.append(user_id)
-            cursor.execute(update_role_query, role_update_vals)
+        update_user_query = f"""
+            UPDATE tfs_user
+            SET {', '.join(user_update_cols)}
+            WHERE user_id = %s
+        """
+        user_update_vals.append(user_id)
+        cursor.execute(update_user_query, user_update_vals)
 
         conn.commit()
         return api_response(200, "User updated successfully")
@@ -219,32 +347,48 @@ def update_user():
         return api_response(500, f"Failed to update user: {str(e)}")
 
     finally:
-        cursor.close()
-        conn.close()
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
+# ------------------------
+# DELETE USER (soft delete + remove file)
+# ------------------------
 @user_bp.route("/delete_user", methods=["PUT"])
 def delete_user():
-    data = request.get_json()
-
-    if not data:
-        return api_response(400, "Invalid JSON or no body received")
-
+    data = request.get_json(silent=True) or {}
     user_id = data.get("user_id")
     if not user_id:
         return api_response(400, "user_id is required")
 
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
-        query = """
+        cursor.execute("SELECT profile_picture FROM tfs_user WHERE user_id=%s", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return api_response(404, "User not found")
+
+        profile_file = row.get("profile_picture")
+
+        cursor.execute("""
             UPDATE tfs_user
             SET is_delete = 0, is_active = 0
             WHERE user_id = %s
-        """
-        cursor.execute(query, (user_id,))
+        """, (user_id,))
         conn.commit()
+
+        try:
+            safe_remove_profile_pic(profile_file)
+        except Exception as e:
+            print("DELETE FAILED (user delete):", e, "file=", profile_file)
 
         return api_response(200, "User Deleted successfully")
 
@@ -253,5 +397,11 @@ def delete_user():
         return api_response(500, f"Failed to Delete user: {str(e)}")
 
     finally:
-        cursor.close()
-        conn.close()
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass

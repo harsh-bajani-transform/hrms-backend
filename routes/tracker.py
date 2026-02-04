@@ -1,9 +1,11 @@
 from flask import Blueprint, request
-from config import get_db_connection, BASE_UPLOAD_URL, UPLOAD_SUBDIRS
+from config import get_db_connection, BASE_UPLOAD_URL, UPLOAD_SUBDIRS, UPLOAD_FOLDER
 from utils.response import api_response
-from utils.file_utils import save_base64_file
+from utils.file_utils import save_base64_file  # kept (not used now in update)
 from utils.api_log_utils import log_api_call
 from datetime import datetime
+import re
+import os
 
 tracker_bp = Blueprint("tracker", __name__)
 
@@ -23,19 +25,13 @@ def calculate_targets(base_target, user_tenure):
 
 
 def normalize_month_year(month_year: str) -> str:
-    """
-    Accepts any case input like 'jan2026', 'JAN2026', 'Jan2026'
-    Returns normalized 'Jan2026'.
-    """
     month_year = (month_year or "").strip()
     if not month_year:
         return ""
 
-    # Must at least have 3 letters + 4 digits (example: Jan2026)
-    # But we won't hard-fail; we'll normalize best-effort.
     s = month_year.lower()
-    month_abbr = s[:3].capitalize()          # jan -> Jan
-    year_part = s[3:]                        # 2026
+    month_abbr = s[:3].capitalize()
+    year_part = s[3:]
     return f"{month_abbr}{year_part}"
 
 
@@ -66,79 +62,163 @@ def get_role_context(cursor, user_id: int) -> dict:
 
 
 def cleaned_csv_col(col_sql: str) -> str:
-    """
-    Your DB sometimes stores ids like:
-      "[111, 113]" or "[111]"
-    This helper returns SQL that removes spaces and brackets, so FIND_IN_SET works.
-    """
     return f"REPLACE(REPLACE(REPLACE({col_sql}, '[', ''), ']', ''), ' ', '')"
 
 
+# ---------- NEW: filename helpers (tracker-specific, NOT in file_utils)
+
+def _clean_part(value: str) -> str:
+    value = (value or "").strip()
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"[^A-Za-z0-9_]", "", value)
+    return value or "NA"
+
+
+def build_tracker_filename(project_code: str, task_name: str, user_name: str, original_filename: str) -> str:
+    """
+    Keep your exact format:
+    projectcode_taskname_username_date_time
+    time format: hours with AM/PM (as you had)
+    """
+    if "." not in (original_filename or ""):
+        raise ValueError("Uploaded file has no extension")
+
+    ext = original_filename.rsplit(".", 1)[1].lower().strip()
+    now = datetime.now()
+    date_part = now.strftime("%d-%b-%Y")   # 05-Feb-2026
+    time_part = now.strftime("%I%p")       # 10AM (kept exactly)
+    return (
+        f"{_clean_part(project_code)}_"
+        f"{_clean_part(task_name)}_"
+        f"{_clean_part(user_name)}_"
+        f"{date_part}_{time_part}.{ext}"
+    )
+
+
+def get_tracker_file_path(filename: str) -> str:
+    # physical path for tracker file
+    return os.path.join(UPLOAD_FOLDER, UPLOAD_SUBDIRS["TRACKER_FILES"], filename)
+
+def safe_remove_tracker_file(filename: str) -> bool:
+    """
+    Deletes file from tracker_files folder if exists.
+    Returns True if deleted, False if not found / nothing deleted.
+    """
+    if not filename:
+        return False
+
+    file_path = get_tracker_file_path(filename)
+
+    # Safety: ensure deletion stays inside tracker_files directory
+    tracker_dir = os.path.abspath(os.path.join(UPLOAD_FOLDER, UPLOAD_SUBDIRS["TRACKER_FILES"]))
+    abs_path = os.path.abspath(file_path)
+    if not abs_path.startswith(tracker_dir + os.sep):
+        # prevents path traversal like ../../something
+        raise ValueError("Invalid file path")
+    print("Deleting file at:", abs_path)
+    if os.path.exists(abs_path):
+        os.remove(abs_path)
+        return True
+
+    return False
+
+def safe_remove_tracker_file(filename: str) -> bool:
+    """
+    Deletes file from uploads/<TRACKER_FILES>/ if exists.
+    Works even if DB stored a URL/path (we basename it).
+    """
+    if not filename:
+        return False
+
+    # ✅ normalize in case DB stored URL/path
+    filename = os.path.basename(str(filename))
+
+    tracker_dir = os.path.abspath(os.path.join(UPLOAD_FOLDER, UPLOAD_SUBDIRS["TRACKER_FILES"]))
+    abs_path = os.path.abspath(os.path.join(tracker_dir, filename))
+
+    # ✅ safety: ensure deletion stays inside tracker_dir
+    if not abs_path.startswith(tracker_dir + os.sep):
+        raise ValueError(f"Invalid file path: {abs_path}")
+
+    if os.path.exists(abs_path):
+        os.remove(abs_path)
+        return True
+
+    return False
+
 # ------------------------
-# ADD TRACKER
+# ADD TRACKER  (multipart + custom filename)
 # ------------------------
 @tracker_bp.route("/add", methods=["POST"])
 def add_tracker():
-    data = request.get_json()
-    required_fields = ["project_id", "task_id", "user_id", "production"]
+    form = request.form
 
-    for field in required_fields:
-        if field not in data:
-            return api_response(400, f"{field} is required")
+    required_fields = ["project_id", "task_id", "user_id", "production", "tenure_target"]
+    for f in required_fields:
+        if not form.get(f):
+            return api_response(400, f"{f} is required")
 
-    project_id = data["project_id"]
-    task_id = data["task_id"]
-    user_id = data["user_id"]
-    production = float(data["production"])
-    tenure_target = float(data["tenure_target"])
-    tracker_file_base64 = data.get("tracker_file")
-    tracker_file = None
-    is_active = 1
-    billable_hours = production / tenure_target
+    project_id = int(form["project_id"])
+    task_id = int(form["task_id"])
+    user_id = int(form["user_id"])
+    production = float(form["production"])
+    tenure_target = float(form["tenure_target"])
 
-    if tracker_file_base64:
-        tracker_file = save_base64_file(tracker_file_base64, UPLOAD_SUBDIRS["TRACKER_FILES"])
+    billable_hours = production / tenure_target if tenure_target else 0
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        cursor.execute("SELECT task_target FROM task WHERE task_id=%s", (task_id,))
-        user = cursor.fetchone()
-        if not user:
+        # --- validate task + get task_target
+        cursor.execute("SELECT task_target, task_name FROM task WHERE task_id=%s", (task_id,))
+        task_row = cursor.fetchone()
+        if not task_row:
             return api_response(404, "Task not found")
 
-        actual_target = user["task_target"]
+        actual_target = task_row["task_target"]
+        task_name = task_row.get("task_name") or "Task"
+
+        # --- get project_code
+        cursor.execute("SELECT project_code FROM project WHERE project_id=%s", (project_id,))
+        proj_row = cursor.fetchone() or {}
+        project_code = proj_row.get("project_code") or "PROJECT"
+
+        # --- get user_name
+        cursor.execute("SELECT user_name FROM tfs_user WHERE user_id=%s", (user_id,))
+        usr_row = cursor.fetchone() or {}
+        user_name = usr_row.get("user_name") or "USER"
+
+        # ✅ file save (multipart)
+        tracker_file = None
+        uploaded = request.files.get("tracker_file")
+        if uploaded and uploaded.filename:
+            try:
+                from utils.file_utils import save_uploaded_file  # generic
+                custom_name = build_tracker_filename(project_code, task_name, user_name, uploaded.filename)
+                tracker_file = save_uploaded_file(uploaded, UPLOAD_SUBDIRS["TRACKER_FILES"], custom_name)
+            except ValueError as e:
+                return api_response(400, str(e))
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         cursor.execute(
             """
             INSERT INTO task_work_tracker
             (project_id, task_id, user_id, production, actual_target, tenure_target, billable_hours,
-             tracker_file, tracker_file_base64, is_active, date_time, updated_date)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             tracker_file, is_active, date_time, updated_date)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
-                project_id,
-                task_id,
-                user_id,
-                production,
-                actual_target,
-                tenure_target,
-                billable_hours,
-                tracker_file,
-                tracker_file_base64,
-                is_active,
-                now,
-                now,
+                project_id, task_id, user_id, production, actual_target, tenure_target,
+                billable_hours, tracker_file, 1, now, now
             ),
         )
-
         conn.commit()
         tracker_id = cursor.lastrowid
 
-        device_id = data.get("device_id")
-        device_type = data.get("device_type")
+        device_id = form.get("device_id")
+        device_type = form.get("device_type")
         api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_api_call("add_tracker", user_id, device_id, device_type, api_call_time)
 
@@ -154,11 +234,148 @@ def add_tracker():
 
 
 # ------------------------
-# UPDATE TRACKER
+# UPDATE TRACKER (multipart + optional file replace + custom filename)
 # ------------------------
 @tracker_bp.route("/update", methods=["POST"])
 def update_tracker():
-    data = request.get_json()
+    form = request.form
+    tracker_id = form.get("tracker_id")
+    if not tracker_id:
+        return api_response(400, "tracker_id is required")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    # for rollback safety if DB update fails after saving file
+    new_file_saved = None
+
+    try:
+        cursor.execute("SELECT * FROM task_work_tracker WHERE tracker_id=%s", (tracker_id,))
+        tracker = cursor.fetchone()
+        if not tracker:
+            return api_response(404, "Tracker not found")
+
+        old_file = tracker.get("tracker_file")  # may be filename OR url/path
+
+        # update numeric fields (optional)
+        production = float(form.get("production", tracker["production"]))
+        base_target = float(form.get("base_target", tracker["actual_target"]))
+
+        # tenure + user_name
+        cursor.execute("SELECT user_tenure, user_name FROM tfs_user WHERE user_id=%s", (tracker["user_id"],))
+        user_row = cursor.fetchone()
+        if not user_row:
+            return api_response(404, "User not found")
+
+        # compute targets (keep your existing calculate_targets)
+        actual_target, tenure_target = calculate_targets(base_target, user_row["user_tenure"])
+
+        tracker_file = old_file
+        uploaded = request.files.get("tracker_file")
+
+        # ✅ Replace file only if new file provided
+        if uploaded and uploaded.filename:
+            # project_code
+            cursor.execute("SELECT project_code FROM project WHERE project_id=%s", (tracker["project_id"],))
+            proj = cursor.fetchone() or {}
+            project_code = proj.get("project_code") or "PROJECT"
+
+            # task_name
+            cursor.execute("SELECT task_name FROM task WHERE task_id=%s", (tracker["task_id"],))
+            trow = cursor.fetchone() or {}
+            task_name = trow.get("task_name") or "TASK"
+
+            user_name = user_row.get("user_name") or "USER"
+
+            custom_filename = build_tracker_filename(project_code, task_name, user_name, uploaded.filename)
+
+            from utils.file_utils import save_uploaded_file
+
+            # ✅ Save new file first
+            new_file = save_uploaded_file(uploaded, UPLOAD_SUBDIRS["TRACKER_FILES"], custom_filename)
+            new_file_saved = new_file
+
+            # ✅ Delete old file (only if old exists AND not same)
+            try:
+                if old_file:
+                    old_file_norm = os.path.basename(str(old_file))
+                else:
+                    old_file_norm = None
+
+                if old_file_norm and old_file_norm != new_file:
+                    safe_remove_tracker_file(old_file_norm)
+            except Exception as e:
+                # DO NOT fail update if old deletion fails, but don't hide it
+                print("DELETE FAILED (update):", str(e), " old_file=", old_file)
+
+            tracker_file = new_file
+
+        updated_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute(
+            """
+            UPDATE task_work_tracker
+            SET production=%s,
+                actual_target=%s,
+                tenure_target=%s,
+                billable_hours=(%s / NULLIF(%s, 0)),
+                tracker_file=%s,
+                updated_date=%s
+            WHERE tracker_id=%s
+            """,
+            (
+                production,
+                actual_target,
+                tenure_target,
+                production,
+                tenure_target,
+                tracker_file,
+                updated_date,
+                tracker_id,
+            ),
+        )
+        conn.commit()
+
+        # if DB commit succeeded, clear rollback marker
+        new_file_saved = None
+
+        device_id = form.get("device_id")
+        device_type = form.get("device_type")
+        api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_api_call("update_tracker", tracker["user_id"], device_id, device_type, api_call_time)
+
+        return api_response(200, "Tracker updated successfully")
+
+    except ValueError as e:
+        conn.rollback()
+        # rollback: if file was saved but DB update failed, remove newly saved file
+        if new_file_saved:
+            try:
+                safe_remove_tracker_file(new_file_saved)
+            except Exception:
+                pass
+        return api_response(400, str(e))
+
+    except Exception as e:
+        conn.rollback()
+        if new_file_saved:
+            try:
+                safe_remove_tracker_file(new_file_saved)
+            except Exception:
+                pass
+        return api_response(500, f"Failed to update tracker: {str(e)}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------
+# VIEW TRACKERS (UNCHANGED)
+# ------------------------
+@tracker_bp.route("/delete", methods=["POST"])
+def delete_tracker():
+    data = request.get_json() or {}
     tracker_id = data.get("tracker_id")
     if not tracker_id:
         return api_response(400, "tracker_id is required")
@@ -167,65 +384,45 @@ def update_tracker():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        cursor.execute("SELECT * FROM task_work_tracker WHERE tracker_id=%s", (tracker_id,))
+        cursor.execute(
+            "SELECT tracker_id, user_id, tracker_file FROM task_work_tracker WHERE tracker_id=%s",
+            (tracker_id,),
+        )
         tracker = cursor.fetchone()
         if not tracker:
             return api_response(404, "Tracker not found")
 
-        new_user_id = tracker["user_id"]
-
-        cursor.execute("SELECT user_tenure FROM tfs_user WHERE user_id=%s", (new_user_id,))
-        user = cursor.fetchone()
-        if not user:
-            return api_response(404, "User not found")
-
-        production = float(data.get("production", tracker["production"]))
-        base_target = float(data.get("base_target", tracker["actual_target"]))
-
-        tracker_file_base64 = data.get("tracker_file_base64")
-        tracker_file = tracker["tracker_file"]
-        if tracker_file_base64:
-            tracker_file = save_base64_file(tracker_file_base64, UPLOAD_SUBDIRS["TRACKER_FILES"])
-
-        actual_target, tenure_target = calculate_targets(base_target, user["user_tenure"])
-        updated_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+        # ✅ soft delete DB
         cursor.execute(
-            """
-            UPDATE task_work_tracker
-            SET user_id=%s, production=%s, actual_target=%s, tenure_target=%s,
-                tracker_file=%s, tracker_file_base64=%s, updated_date=%s
-            WHERE tracker_id=%s
-            """,
-            (
-                new_user_id,
-                production,
-                actual_target,
-                tenure_target,
-                tracker_file,
-                tracker_file_base64,
-                updated_date,
-                tracker_id,
-            ),
+            "UPDATE task_work_tracker SET is_active = 0 WHERE tracker_id = %s",
+            (tracker_id,),
         )
-
         conn.commit()
+
+        # ✅ delete physical file
+        try:
+            f = tracker.get("tracker_file")
+            if f:
+                f = os.path.basename(str(f))
+            if f:
+                safe_remove_tracker_file(f)
+        except Exception as e:
+            print("DELETE FAILED (delete api):", str(e), " file=", tracker.get("tracker_file"))
 
         device_id = data.get("device_id")
         device_type = data.get("device_type")
         api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_api_call("update_tracker", tracker["user_id"], device_id, device_type, api_call_time)
+        log_api_call("delete_tracker", tracker["user_id"], device_id, device_type, api_call_time)
 
-        return api_response(200, "Tracker updated successfully")
+        return api_response(200, "Tracker deleted successfully")
 
     except Exception as e:
         conn.rollback()
-        return api_response(500, f"Failed to update tracker: {str(e)}")
+        return api_response(500, f"Failed to delete tracker: {str(e)}")
 
     finally:
         cursor.close()
         conn.close()
-
 
 # ------------------------
 # VIEW TRACKERS (your existing logic + month_year normalization + robust manager matching)
@@ -682,58 +879,6 @@ def view_daily_trackers():
 
     except Exception as e:
         return api_response(500, f"Failed to fetch daily trackers: {str(e)}")
-
-    finally:
-        cursor.close()
-        conn.close()
-
-
-
-# ------------------------
-# DELETE TRACKER (SOFT DELETE)
-# ------------------------
-@tracker_bp.route("/delete", methods=["POST"])
-def delete_tracker():
-    data = request.get_json() or {}
-
-    tracker_id = data.get("tracker_id")
-    if not tracker_id:
-        return api_response(400, "tracker_id is required")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        cursor.execute(
-            "SELECT tracker_id, user_id FROM task_work_tracker WHERE tracker_id=%s",
-            (tracker_id,),
-        )
-        tracker = cursor.fetchone()
-
-        if not tracker:
-            return api_response(404, "Tracker not found")
-
-        cursor.execute(
-            """
-            UPDATE task_work_tracker
-            SET is_active = 0
-            WHERE tracker_id = %s
-            """,
-            (tracker_id,),
-        )
-
-        conn.commit()
-
-        device_id = data.get("device_id")
-        device_type = data.get("device_type")
-        api_call_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_api_call("delete_tracker", tracker["user_id"], device_id, device_type, api_call_time)
-
-        return api_response(200, "Tracker deleted successfully")
-
-    except Exception as e:
-        conn.rollback()
-        return api_response(500, f"Failed to delete tracker: {str(e)}")
 
     finally:
         cursor.close()
