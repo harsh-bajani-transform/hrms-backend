@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request
 from routes.auth import auth_bp
 from routes.user import user_bp
 from routes.project import project_bp
@@ -38,6 +38,17 @@ else:
     CORS(app, origins="*")
     print("🏠 Running locally - Development CORS enabled")
 
+# Add CORS headers manually for debugging
+@app.after_request
+def after_request(response):
+    origin = request.headers.get('Origin')
+    if origin in ["https://hrms-frontend-sigma-sage.vercel.app", "http://localhost:3000", "http://localhost:5173"]:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
+
 BASE_URL = ""
 # os.getenv("BASE_URL", "/")
 
@@ -58,6 +69,7 @@ print("\n==== REGISTERED ROUTES ====")
 for r in app.url_map.iter_rules():
     print(r, r.methods)
 print("==== END ROUTES ====\n")
+
 
 @app.route("/")
 def home():
