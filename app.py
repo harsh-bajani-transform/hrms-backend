@@ -18,8 +18,10 @@ import os
 
 app = Flask(__name__)
 
-# Single CORS configuration for all environments
-if os.getenv("RAILWAY_ENVIRONMENT"):
+# Detect if running on Railway (PORT env var is set)
+is_railway = os.getenv("PORT") is not None
+
+if is_railway:
     # Production CORS - specific origins
     CORS(app, 
          origins=[
@@ -30,9 +32,11 @@ if os.getenv("RAILWAY_ENVIRONMENT"):
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
          allow_headers=["Content-Type", "Authorization"],
          supports_credentials=True)
+    print("🚂 Running on Railway - Production CORS enabled")
 else:
     # Local development CORS - all origins
     CORS(app, origins="*")
+    print("🏠 Running locally - Development CORS enabled")
 
 BASE_URL = ""
 # os.getenv("BASE_URL", "/")
