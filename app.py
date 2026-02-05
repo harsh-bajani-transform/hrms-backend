@@ -18,6 +18,23 @@ import os
 
 app = Flask(__name__)
 
+# Configure CORS for production
+if os.getenv("RAILWAY_ENVIRONMENT"):
+    # Production CORS configuration
+    CORS(app, 
+         origins=[
+             "https://hrms-frontend-sigma-sage.vercel.app",
+             "https://hrms-frontend-sigma-sage.vercel.app/",
+             "http://localhost:3000",
+             "http://localhost:5173"
+         ],
+         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+         allow_headers=["Content-Type", "Authorization"],
+         supports_credentials=True)
+else:
+    # Local development CORS
+    CORS(app, origins="*")
+
 BASE_URL =  ""
 # os.getenv("BASE_URL", "/")
 
@@ -55,8 +72,5 @@ def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 if __name__ == "__main__":
-    # For local development
+    # app.run(debug=True)
     app.run(host="0.0.0.0", port=5000, debug=True)
-else:
-    # For production (Railway)
-    app.config['DEBUG'] = False
