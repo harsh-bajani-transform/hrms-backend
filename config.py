@@ -30,10 +30,7 @@ RESET_FRONTEND_URL = os.getenv("RESET_FRONTEND_URL", "https://tfshrms.cloud/")
 
 # Validate required environment variables
 if not RESET_SECRET_KEY:
-    print("⚠️  RESET_SECRET_KEY is missing from environment variables")
-    print("Password reset functionality will not work without this key")
-    # Don't crash - use a default for development
-    RESET_SECRET_KEY = "default_reset_secret_key_change_in_production"
+    raise RuntimeError("RESET_SECRET_KEY is missing from .env file")
 
 # Check if encryption key exists and is valid
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
@@ -62,13 +59,11 @@ def get_db_connection():
         print("Please check your .env file.")
     
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "localhost"),  # Use env var or default to 'localhost'
-        port=int(os.getenv("DB_PORT", 3306)),  # Use env var or default to 3306
-        user=os.getenv("DB_USERNAME", "root"),  # Use env var or default to 'root'
-        password=os.getenv("DB_PASSWORD", ""),  # Use env var or default to empty string
-        database=os.getenv(
-            "DB_DATABASE", "tfs_hrms"
-        ),  # Use env var or default to 'tfs_hrms'
+        host=os.getenv("DB_HOST"),  # Use env var or default to 'localhost'
+        port=int(os.getenv("DB_PORT")),  # Use env var or default to 3306
+        user=os.getenv("DB_USERNAME"),  # Use env var or default to 'root'
+        password=os.getenv("DB_PASSWORD"),  # Use env var or default to empty string
+        database=os.getenv("DB_DATABASE"),  # Use env var or default to 'tfs_hrms'
     )
 
     print("DB USER:", os.getenv("DB_USERNAME"))
