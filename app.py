@@ -1,54 +1,24 @@
 from flask import Flask
-
 from routes.auth import auth_bp
-
 from routes.user import user_bp
-
 from routes.project import project_bp
-
 from routes.dropdown import dropdown_bp
-
 from routes.task import task_bp
-
 from routes.tracker import tracker_bp
-
 from routes.user_permission import permission_bp
-
 from routes.dashboard import dashboard_bp
-
 from routes.project_monthly_tracker import project_monthly_tracker_bp
-
 from routes.user_monthly_tracker import user_monthly_tracker_bp
-
 from routes.api_log_list import api_log_list_bp
-
 from routes.password_reset import password_reset_bp
 
-
-
 from flask_cors import CORS
-
 import os
-
-
-
 
 
 app = Flask(__name__)
 
-# Configure CORS for all environments
-CORS(app, 
-     origins=[
-         "https://hrms-frontend-sigma-sage.vercel.app",
-         "http://localhost:3000",
-         "http://localhost:5173",
-         "*"  # Fallback for development
-     ],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization"],
-     supports_credentials=True)
-
-BASE_URL = ""
+BASE_URL =  ""
 # os.getenv("BASE_URL", "/")
 
 app.register_blueprint(auth_bp, url_prefix=f"/auth")
@@ -64,6 +34,21 @@ app.register_blueprint(user_monthly_tracker_bp,url_prefix=f"/user_monthly_tracke
 app.register_blueprint(api_log_list_bp, url_prefix="/api_log_list")
 app.register_blueprint(password_reset_bp, url_prefix="/password_reset")
 
+print("\n==== REGISTERED ROUTES ====")
+for r in app.url_map.iter_rules():
+    print(r, r.methods)
+print("==== END ROUTES ====\n")
+
+
+@app.route("/")
+def home():
+    return "Flask Auth API is running!"
+
+@app.route("/uploads/<path:filename>")
+def serve_uploads(filename):
+    from config import UPLOAD_FOLDER
+    from flask import send_from_directory
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 if __name__ == "__main__":
     # app.run(debug=True)
