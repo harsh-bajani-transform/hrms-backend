@@ -18,13 +18,12 @@ import os
 
 app = Flask(__name__)
 
-# Configure CORS for production
+# Single CORS configuration for all environments
 if os.getenv("RAILWAY_ENVIRONMENT"):
-    # Production CORS configuration
+    # Production CORS - specific origins
     CORS(app, 
          origins=[
              "https://hrms-frontend-sigma-sage.vercel.app",
-             "https://hrms-frontend-sigma-sage.vercel.app/",
              "http://localhost:3000",
              "http://localhost:5173"
          ],
@@ -32,10 +31,10 @@ if os.getenv("RAILWAY_ENVIRONMENT"):
          allow_headers=["Content-Type", "Authorization"],
          supports_credentials=True)
 else:
-    # Local development CORS
+    # Local development CORS - all origins
     CORS(app, origins="*")
 
-BASE_URL =  ""
+BASE_URL = ""
 # os.getenv("BASE_URL", "/")
 
 app.register_blueprint(auth_bp, url_prefix=f"/auth")
@@ -47,7 +46,7 @@ app.register_blueprint(tracker_bp, url_prefix=f"/tracker")
 app.register_blueprint(permission_bp, url_prefix=f"/permission")
 app.register_blueprint(dashboard_bp,url_prefix=f"/dashboard")
 app.register_blueprint(project_monthly_tracker_bp,url_prefix=f"/project_monthly_tracker")
-app.register_blueprint(user_monthly_tracker_bp,url_prefix=f"/user_monthly_tracker")
+app.register_blueprint(user_monthly_tracker_bp,url_prefix="/user_monthly_tracker")
 app.register_blueprint(api_log_list_bp, url_prefix="/api_log_list")
 app.register_blueprint(password_reset_bp, url_prefix="/password_reset")
 
@@ -55,11 +54,6 @@ print("\n==== REGISTERED ROUTES ====")
 for r in app.url_map.iter_rules():
     print(r, r.methods)
 print("==== END ROUTES ====\n")
-
-
-# CORS(app, supports_credentials=True)
-CORS(app, resources={r"/*": {"origins": "*"}})
-
 
 @app.route("/")
 def home():
