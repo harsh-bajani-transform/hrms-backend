@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask
 from routes.auth import auth_bp
 from routes.user import user_bp
 from routes.project import project_bp
@@ -10,7 +10,6 @@ from routes.dashboard import dashboard_bp
 from routes.project_monthly_tracker import project_monthly_tracker_bp
 from routes.user_monthly_tracker import user_monthly_tracker_bp
 from routes.api_log_list import api_log_list_bp
-from routes.password_reset import password_reset_bp
 
 from flask_cors import CORS
 import os
@@ -18,38 +17,7 @@ import os
 
 app = Flask(__name__)
 
-# Detect if running on Railway (PORT env var is set)
-is_railway = os.getenv("PORT") is not None
-
-if is_railway:
-    # Production CORS - specific origins
-    CORS(app, 
-         origins=[
-             "https://hrms-frontend-sigma-sage.vercel.app",
-             "http://localhost:3000",
-             "http://localhost:5173"
-         ],
-         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-         allow_headers=["Content-Type", "Authorization"],
-         supports_credentials=True)
-    print("🚂 Running on Railway - Production CORS enabled")
-else:
-    # Local development CORS - all origins
-    CORS(app, origins="*")
-    print("🏠 Running locally - Development CORS enabled")
-
-# Add CORS headers manually for debugging
-@app.after_request
-def after_request(response):
-    origin = request.headers.get('Origin')
-    if origin in ["https://hrms-frontend-sigma-sage.vercel.app", "http://localhost:3000", "http://localhost:5173"]:
-        response.headers.add('Access-Control-Allow-Origin', origin)
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    return response
-
-BASE_URL = ""
+BASE_URL =  ""
 # os.getenv("BASE_URL", "/")
 
 app.register_blueprint(auth_bp, url_prefix=f"/auth")
@@ -61,14 +29,11 @@ app.register_blueprint(tracker_bp, url_prefix=f"/tracker")
 app.register_blueprint(permission_bp, url_prefix=f"/permission")
 app.register_blueprint(dashboard_bp,url_prefix=f"/dashboard")
 app.register_blueprint(project_monthly_tracker_bp,url_prefix=f"/project_monthly_tracker")
-app.register_blueprint(user_monthly_tracker_bp,url_prefix="/user_monthly_tracker")
+app.register_blueprint(user_monthly_tracker_bp,url_prefix=f"/user_monthly_tracker")
 app.register_blueprint(api_log_list_bp, url_prefix="/api_log_list")
-app.register_blueprint(password_reset_bp, url_prefix="/password_reset")
 
-print("\n==== REGISTERED ROUTES ====")
-for r in app.url_map.iter_rules():
-    print(r, r.methods)
-print("==== END ROUTES ====\n")
+# CORS(app, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 @app.route("/")
