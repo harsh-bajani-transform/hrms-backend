@@ -55,5 +55,8 @@ def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 if __name__ == "__main__":
-    # app.run(debug=True)
+    # For local development
     app.run(host="0.0.0.0", port=5000, debug=True)
+else:
+    # For production (Railway)
+    app.config['DEBUG'] = False
