@@ -26,7 +26,7 @@ UPLOAD_SUBDIRS = {
 
 RESET_SECRET_KEY = os.getenv("RESET_SECRET_KEY")
 RESET_TOKEN_TTL_SECONDS = int(os.getenv("RESET_TOKEN_TTL_SECONDS", "300"))
-RESET_FRONTEND_URL = os.getenv("RESET_FRONTEND_URL", "https://tfshrms.cloud/")
+RESET_FRONTEND_URL = os.getenv("RESET_FRONTEND_URL", "https://hrms-frontend-sigma-sage.vercel.app/")
 
 # Validate required environment variables
 if not RESET_SECRET_KEY:
