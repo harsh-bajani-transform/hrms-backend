@@ -18,6 +18,21 @@ import os
 
 app = Flask(__name__)
 
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "https://hrms-frontend-sigma-sage.vercel.app",
+            "http://localhost:3000",  # for local development
+            "http://localhost:5173"   # if using Vite
+        ],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+        "expose_headers": ["Content-Range", "X-Content-Range"],
+        "supports_credentials": True,
+        "max_age": 3600
+    }
+})
+
 BASE_URL =  ""
 # os.getenv("BASE_URL", "/")
 
